@@ -24,7 +24,7 @@ struct ConnectionView: View {
       }
 
       Section {
-        TextField("http://host:9119", text: $store.serverURL)
+        TextField("https://host:9119", text: $store.serverURL)
           .keyboardType(.URL)
           .textInputAutocapitalization(.never)
           .autocorrectionDisabled()
@@ -38,6 +38,10 @@ struct ConnectionView: View {
         Text("Server")
       } footer: {
         statusFooter
+        if store.serverURL.trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("http://") {
+          Text("HTTP is unencrypted. Only continue if you trust this server and its entire network route; the app cannot verify where a hostname resolves.")
+            .foregroundStyle(.orange)
+        }
       }
 
       Section {
@@ -173,7 +177,7 @@ struct ConnectionView: View {
     case .checking:
       Label("Checking…", systemImage: "ellipsis.circle")
     case .invalidURL:
-      Label("Enter a valid server URL.", systemImage: "exclamationmark.triangle")
+      Label("Use HTTPS, or explicitly enter http:// for a trusted local route.", systemImage: "exclamationmark.triangle")
         .foregroundStyle(.red)
     case .unreachable:
       VStack(alignment: .leading, spacing: 6) {

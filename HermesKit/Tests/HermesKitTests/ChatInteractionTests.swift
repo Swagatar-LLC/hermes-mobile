@@ -86,6 +86,35 @@ struct ChatInteractionTests {
     #expect(store.state.errorBanner == nil)
   }
 
+  @Test func recoveredApprovalCannotSendBlindApproval() async {
+    var initial = readyState()
+    initial.pendingInteraction = .approval(ChatFeature.recoveredApprovalRequest)
+    let store = TestStore(initialState: initial) { ChatFeature() }
+    await store.send(.respondToApproval(approve: true, all: false))
+    await store.send(.respondToApproval(approve: true, all: true))
+    #expect(store.state.pendingInteraction == .approval(ChatFeature.recoveredApprovalRequest))
+    #expect(store.state.transcript.isEmpty)
+  }
+
+  @Test func commandlessApprovalCanStillBeDenied() async {
+    var initial = readyState()
+    initial.pendingInteraction = .approval(ChatFeature.recoveredApprovalRequest)
+    let sent = LockIsolated<String?>(nil)
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable method, params in
+        sent.setValue(method == "approval.respond" ? params["choice"]?.stringValue : nil)
+        return .object(["resolved": .number(1)])
+      }
+    }
+    await store.send(.respondToApproval(approve: false, all: false)) {
+      $0.pendingInteraction = nil
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Denied"))]
+    }
+    await store.finish()
+    #expect(sent.value == "deny")
+  }
+
   @Test func approveAllSendsAllTrue() async {
     let sent = LockIsolated<JSONValue?>(nil)
     var initial = readyState()

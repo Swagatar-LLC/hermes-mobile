@@ -27,22 +27,13 @@ struct PushSetupTests {
     #expect(pushPromptSnoozeDays(laterCount: -5) == 1)
   }
 
-  // The install prompt asks the agent to install the plugin as a DIRECTORY plugin (clone into
-  // ~/.hermes/plugins/) and enable it — a plain pip install won't mount the registration route.
-  @Test func installPromptDescribesDirectoryInstall() {
-    #expect(PushSetup.installPrompt.contains("git clone"))
-    #expect(PushSetup.installPrompt.contains("~/.hermes/plugins/hermes-push"))
-    #expect(PushSetup.installPrompt.contains("plugins.enabled") || PushSetup.installPrompt.contains("plugins enable"))
+  @Test func installPromptRequiresReviewedPinAndNoLiveBranchCommand() {
+    #expect(PushSetup.installPrompt.contains("immutable commit"))
+    #expect(PushSetup.installPrompt.contains("explicit approval"))
+    #expect(!PushSetup.installPrompt.contains("git clone"))
+    #expect(!PushSetup.installPrompt.contains("git pull"))
+    #expect(!PushSetup.installPrompt.contains("pip install"))
     #expect(PushSetup.installPrompt.contains("hermes-push"))
-  }
-
-  // The prompt has to work for someone who ALREADY has the plugin: `git clone` into an
-  // existing non-empty directory fails outright, so the pull branch must be spelled out.
-  @Test func installPromptCoversUpdatingAnExistingCheckout() {
-    #expect(PushSetup.installPrompt.contains("git -C ~/.hermes/plugins/hermes-push pull"))
-    // …and it must say why a restart is still needed after a pull, or the user updates the
-    // files and keeps getting pushes from the code still loaded in the running process.
-    #expect(PushSetup.installPrompt.uppercased().contains("RESTART"))
   }
 
   // MARK: Version comparison (drives the Settings update prompt)

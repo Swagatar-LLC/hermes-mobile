@@ -54,15 +54,14 @@ public struct ApprovalRequest: Equatable, Sendable, Decodable {
 
   /// Whether the card may offer the session-wide "Approve all in this session"
   /// escalation (`choice: "session"`, which persists the matched danger pattern for the
-  /// rest of the session and `resolve_all`s the queue). A push-tap-recovered request
-  /// (#30 workaround) carries no command and no pattern — approving it blind is already
-  /// the leap the honest recovery copy covers, but silently whitelisting an UNSEEN
-  /// pattern goes a step further, so the toggle is hidden. Content-derived on purpose:
-  /// no `isSynthesized` marker exists anywhere (the recovered card is distinguished
-  /// only by its content).
+  /// rest of the session and `resolve_all`s the queue). The view also requires `canApprove`,
+  /// so no approval is offered when a recovered request lacks the command itself.
   public var offersSessionApproval: Bool {
     command?.isEmpty == false || patternKey?.isEmpty == false || !patternKeys.isEmpty
   }
+
+  /// A pattern or description is not the command the user is being asked to authorize.
+  public var canApprove: Bool { command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false }
 }
 
 /// Payload for a `clarify.request` event. `choices` is empty when the agent expects

@@ -308,8 +308,8 @@ struct SettingsFeatureTests {
 
   // MARK: - Plugin update (hermes-push 0.2.0 subagent filtering)
 
-  /// An outdated, git-updatable plugin offers the one-tap update.
-  @Test func outdatedGitPluginOffersTheUpdate() async {
+  /// Even a git checkout requires manual review of an immutable commit.
+  @Test func outdatedGitPluginRequiresManualReview() async {
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
@@ -323,8 +323,8 @@ struct SettingsFeatureTests {
     await store.receive(\.pushPluginInfoLoaded) {
       $0.pushPlugin = PushPluginInfo(status: .ready, version: "0.1.0", canUpdateGit: true)
     }
-    #expect(store.state.pluginUpdateAvailable)
-    #expect(!store.state.pluginUpdateNeedsManualSteps)
+    #expect(!store.state.pluginUpdateAvailable)
+    #expect(store.state.pluginUpdateNeedsManualSteps)
     await store.send(.doneTapped)
   }
 
@@ -368,97 +368,13 @@ struct SettingsFeatureTests {
     }
   }
 
-  /// A successful pull lands on `.updated` — the state the view renders the RESTART notice
-  /// from. It must not read as a plain success: the new code isn't running yet.
-  @Test func successfulUpdateRequiresARestart() async {
-    let called = LockIsolated(false)
-    let store = TestStore(
-      initialState: SettingsFeature.State(
-        connection: connection,
-        pushPlugin: PushPluginInfo(status: .ready, version: "0.1.0", canUpdateGit: true)
-      )
-    ) {
-      SettingsFeature()
-    } withDependencies: {
-      $0.hermesREST.updatePushPlugin = { @Sendable _ in
-        called.setValue(true)
-        return PushPluginUpdateResult(unchanged: false)
-      }
-    }
-
-    await store.send(.updatePluginTapped) { $0.pluginUpdate = .updating }
-    await store.receive(\.pluginUpdateResult) { $0.pluginUpdate = .updated }
-    #expect(called.value)
-    // The offer is withdrawn once acted on — the outstanding action is a restart, and the hub
-    // would report the NEW version off disk while the old code is still loaded.
-    #expect(!store.state.pluginUpdateAvailable)
-  }
-
-  /// "Already up to date" is a distinct state — there is nothing to restart for.
-  @Test func unchangedPullDoesNotAskForARestart() async {
-    let store = TestStore(
-      initialState: SettingsFeature.State(
-        connection: connection,
-        pushPlugin: PushPluginInfo(status: .ready, version: "0.1.0", canUpdateGit: true)
-      )
-    ) {
-      SettingsFeature()
-    } withDependencies: {
-      $0.hermesREST.updatePushPlugin = { @Sendable _ in PushPluginUpdateResult(unchanged: true) }
-    }
-
-    await store.send(.updatePluginTapped) { $0.pluginUpdate = .updating }
-    await store.receive(\.pluginUpdateResult) { $0.pluginUpdate = .alreadyCurrent }
-  }
-
-  /// The agent's own reason reaches the UI verbatim — the user has to act on it on their host.
-  @Test func failedUpdateSurfacesTheServerReason() async {
-    let detail = "Plugin 'hermes-push' is not a git checkout; cannot pull updates."
-    let store = TestStore(
-      initialState: SettingsFeature.State(
-        connection: connection,
-        pushPlugin: PushPluginInfo(status: .ready, version: "0.1.0", canUpdateGit: true)
-      )
-    ) {
-      SettingsFeature()
-    } withDependencies: {
-      $0.hermesREST.updatePushPlugin = { @Sendable _ in
-        throw RESTError.server(status: 400, detail: detail)
-      }
-    }
-
-    await store.send(.updatePluginTapped) { $0.pluginUpdate = .updating }
-    await store.receive(\.pluginUpdateResult) { $0.pluginUpdate = .failed(detail) }
-  }
-
-  /// A non-`RESTError` failure still resolves the button rather than leaving it spinning.
-  @Test func unexpectedUpdateFailureStillResolves() async {
-    struct Boom: Error {}
-    let store = TestStore(
-      initialState: SettingsFeature.State(
-        connection: connection,
-        pushPlugin: PushPluginInfo(status: .ready, version: "0.1.0", canUpdateGit: true)
-      )
-    ) {
-      SettingsFeature()
-    } withDependencies: {
-      $0.hermesREST.updatePushPlugin = { @Sendable _ in throw Boom() }
-    }
-
-    await store.send(.updatePluginTapped) { $0.pluginUpdate = .updating }
-    await store.receive(\.pluginUpdateResult) {
-      $0.pluginUpdate = .failed(RESTError.unreachable.message)
-    }
-  }
-
-  /// A second tap while a pull is in flight is a no-op — no duplicate request.
-  @Test func updateTapIsIgnoredWhileInFlight() async {
+  /// A stale button action cannot invoke the host's privileged git update endpoint.
+  @Test func staleUpdateActionCannotCallHost() async {
     let calls = LockIsolated(0)
     let store = TestStore(
       initialState: SettingsFeature.State(
         connection: connection,
-        pushPlugin: PushPluginInfo(status: .ready, version: "0.1.0", canUpdateGit: true),
-        pluginUpdate: .updating
+        pushPlugin: PushPluginInfo(status: .ready, version: "0.1.0", canUpdateGit: true)
       )
     ) {
       SettingsFeature()
@@ -468,9 +384,11 @@ struct SettingsFeatureTests {
         return PushPluginUpdateResult(unchanged: false)
       }
     }
-
-    await store.send(.updatePluginTapped) // already `.updating` → no state change, no effect
+    #expect(!store.state.pluginUpdateAvailable)
+    #expect(store.state.pluginUpdateNeedsManualSteps)
+    await store.send(.updatePluginTapped)
     #expect(calls.value == 0)
+    #expect(store.state.pluginUpdate == .idle)
   }
 
   // MARK: Default swipe action (issue #73)

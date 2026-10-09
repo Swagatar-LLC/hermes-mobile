@@ -1,4 +1,5 @@
 import ComposableArchitecture
+import Darwin
 import Foundation
 
 /// Onboarding: a staged, capability-aware connection flow.
@@ -609,11 +610,46 @@ func asRESTError(_ error: any Error) -> RESTError {
   error as? RESTError ?? RESTError(transport: error)
 }
 
-/// Lenient URL parsing: accept `host:port` by defaulting to `http://`.
+/// Scheme-less addresses use TLS. Explicit HTTP is an informed trust decision, not proof
+/// that a hostname resolves to a private destination.
 func parseServerURL(_ string: String) -> URL? {
   let trimmed = string.trimmingCharacters(in: .whitespaces)
   guard !trimmed.isEmpty else { return nil }
-  let withScheme = trimmed.contains("://") ? trimmed : "http://\(trimmed)"
-  guard let url = URL(string: withScheme), url.host?.isEmpty == false else { return nil }
+  let withScheme = trimmed.contains("://") ? trimmed : "https://\(trimmed)"
+  guard let url = URL(string: withScheme), let host = url.host, !host.isEmpty,
+        url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
+        url.scheme?.lowercased() == "https"
+          || (url.scheme?.lowercased() == "http" && isLocalServerHost(host))
+  else { return nil }
   return url
+}
+
+/// Limit explicit HTTP to local-looking names and private address literals. DNS locality
+/// cannot be established from a hostname; the user must trust the configured route.
+private func isLocalServerHost(_ host: String) -> Bool {
+  let host = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]."))
+  if host.contains(":") {
+    let literal = String(host.split(separator: "%", maxSplits: 1)[0])
+    var address = in6_addr()
+    guard literal.withCString({ inet_pton(AF_INET6, $0, &address) }) == 1 else { return false }
+    let bytes = withUnsafeBytes(of: address) { Array($0) }
+    return bytes == Array(repeating: 0, count: 15) + [1]
+      || bytes[0] & 0xfe == 0xfc // unique local fc00::/7
+      || bytes[0] == 0xfe && bytes[1] & 0xc0 == 0x80 // link-local fe80::/10
+  }
+  if host == "localhost" || host.hasSuffix(".localhost") || host.hasSuffix(".local")
+    || host.hasSuffix(".tailnet") || host.hasSuffix(".ts.net") { return true }
+
+  let octets = host.split(separator: ".", omittingEmptySubsequences: false)
+  if octets.count == 4, octets.allSatisfy({ $0.allSatisfy({ $0.isASCII && $0.isNumber }) }) {
+    let ip = octets.compactMap { UInt8($0) }
+    guard ip.count == 4 else { return false }
+    let first = ip[0], second = ip[1]
+    return first == 10 || first == 127 || first == 192 && second == 168
+      || first == 172 && (16...31).contains(second)
+      || first == 169 && second == 254
+      || first == 100 && (64...127).contains(second)
+  }
+  // Unqualified names are commonly resolved on the LAN; explicit HTTP is still required.
+  return !host.contains(".") && !host.contains(":") && !host.isEmpty
 }

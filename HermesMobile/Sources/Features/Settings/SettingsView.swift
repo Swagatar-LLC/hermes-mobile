@@ -63,25 +63,11 @@ struct SettingsView: View {
       }
 
       Section {
-        // Plugin update, offered above the toggle because an out-of-date plugin sends pushes
-        // the user is actively complaining about. Shown whether or not push is currently
-        // available — an installed-but-disabled plugin is still worth updating.
-        if store.pluginUpdateAvailable {
+        if store.pluginUpdateNeedsManualSteps {
           VStack(alignment: .leading, spacing: 4) {
             Label("Plugin update available", systemImage: "arrow.down.circle")
               .font(.subheadline.weight(.semibold))
-            Text(pluginUpdateExplanation)
-              .font(.footnote).foregroundStyle(.secondary)
-          }
-          Button("Update plugin") { store.send(.updatePluginTapped) }
-            .disabled(store.pluginUpdate == .updating)
-        } else if store.pluginUpdateNeedsManualSteps {
-          // Out of date but the agent can't pull it (pip install / hand-copied directory), so
-          // a button here would only 400. Route to the guide, which offers the chat prompt.
-          VStack(alignment: .leading, spacing: 4) {
-            Label("Plugin update available", systemImage: "arrow.down.circle")
-              .font(.subheadline.weight(.semibold))
-            Text("\(pluginUpdateExplanation) This copy can't be updated from the app — ask your agent to update it.")
+            Text("\(pluginUpdateExplanation) Review an immutable commit before installing; the app cannot safely update a live branch.")
               .font(.footnote).foregroundStyle(.secondary)
           }
           Button("How to update the plugin") { showingPushGuide = true }

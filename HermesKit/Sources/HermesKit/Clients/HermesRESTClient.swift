@@ -546,6 +546,35 @@ private let authLog = Logger(subsystem: "me.honcharenko.HermesKit", category: "a
 // (e.g. `HermesProfileClient`) can reuse the exact same request/decoding/validation
 // path rather than duplicating it.
 
+/// Reject redirects outside the original scheme, host and effective port before URLSession
+/// can replay credential-bearing bodies, headers or cookies to a different destination.
+final class CredentialRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+  let origin: URL
+
+  init(origin: URL) { self.origin = origin }
+
+  func urlSession(
+    _ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void
+  ) {
+    completionHandler(Self.sameOrigin(origin, request.url) ? request : nil)
+  }
+
+  static func sameOrigin(_ original: URL, _ destination: URL?) -> Bool {
+    guard let destination, let scheme = original.scheme?.lowercased(),
+          let host = original.host?.lowercased(), let targetScheme = destination.scheme?.lowercased(),
+          let targetHost = destination.host?.lowercased(), scheme == targetScheme, host == targetHost,
+          ["http", "https"].contains(scheme) else { return false }
+    let defaultPort = scheme == "https" ? 443 : 80
+    return (original.port ?? defaultPort) == (destination.port ?? defaultPort)
+  }
+}
+
+func credentialData(for request: URLRequest, session: URLSession) async throws -> (Data, URLResponse) {
+  guard let url = request.url else { throw RESTError.unreachable }
+  return try await session.data(for: request, delegate: CredentialRedirectGuard(origin: url))
+}
+
 /// Build a dedicated `URLSession` for password login with its own cookie jar so captured
 /// cookies never bleed into `.shared`. Inherits the source session's `protocolClasses`
 /// (so test mocks still intercept) and accepts all cookies.
@@ -575,7 +604,7 @@ func login(
   let data: Data
   let response: URLResponse
   do {
-    (data, response) = try await session.data(for: request)
+    (data, response) = try await credentialData(for: request, session: session)
   } catch {
     throw RESTError(transport: error)
   }
@@ -678,7 +707,7 @@ private func nativeTokenPost(
   let data: Data
   let response: URLResponse
   do {
-    (data, response) = try await session.data(for: request)
+    (data, response) = try await credentialData(for: request, session: session)
   } catch {
     throw RESTError(transport: error)
   }
@@ -715,7 +744,7 @@ func get<T: Decodable>(_ url: URL, auth: RequestAuth, session: URLSession) async
   let data: Data
   let response: URLResponse
   do {
-    (data, response) = try await session.data(for: request)
+    (data, response) = try await credentialData(for: request, session: session)
   } catch {
     throw RESTError(transport: error)
   }
@@ -775,7 +804,7 @@ func postJSON<T: Decodable>(
   let data: Data
   let response: URLResponse
   do {
-    (data, response) = try await session.data(for: request)
+    (data, response) = try await credentialData(for: request, session: session)
   } catch {
     throw RESTError(transport: error)
   }
@@ -804,7 +833,7 @@ func send(
   let data: Data
   let response: URLResponse
   do {
-    (data, response) = try await session.data(for: request)
+    (data, response) = try await credentialData(for: request, session: session)
   } catch {
     throw RESTError(transport: error)
   }

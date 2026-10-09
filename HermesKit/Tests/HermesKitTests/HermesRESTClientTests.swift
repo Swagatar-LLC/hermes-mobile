@@ -3,6 +3,34 @@ import Testing
 
 @testable import HermesKit
 
+@Suite struct CredentialRedirectTests {
+  @Test func credentialBodyCannotFollowDowngradeOrCrossOriginRedirect() throws {
+    let origin = try #require(URL(string: "https://gateway.example:9119/auth/password-login"))
+    let task = URLSession.shared.dataTask(with: origin)
+    let guardDelegate = CredentialRedirectGuard(origin: origin)
+    for code in [307, 308] {
+      let response = try #require(HTTPURLResponse(
+        url: origin, statusCode: code, httpVersion: nil, headerFields: nil
+      ))
+      for location in [
+        "http://gateway.example:9119/auth/password-login",
+        "https://evil.example:9119/auth/password-login",
+        "https://gateway.example:9120/auth/password-login",
+      ] {
+        var followed: URLRequest?
+        guardDelegate.urlSession(
+          .shared, task: task, willPerformHTTPRedirection: response,
+          newRequest: URLRequest(url: try #require(URL(string: location)))
+        ) { followed = $0 }
+        #expect(followed == nil)
+      }
+    }
+    #expect(CredentialRedirectGuard.sameOrigin(
+      origin, URL(string: "https://gateway.example:9119/another-path")
+    ))
+  }
+}
+
 /// A `URLProtocol` stub so REST tests run fully offline. Serialized because the stub
 /// state is process-global.
 final class MockURLProtocol: URLProtocol {
