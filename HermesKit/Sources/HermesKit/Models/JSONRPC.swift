@@ -119,6 +119,16 @@ public struct JSONRPCRequest: Encodable, Equatable, Sendable {
     return encoder
   }()
 
+  /// The wire text of an error response to a server→client request (same encoder as every
+  /// other outbound frame).
+  static func errorReplyText(id: String, code: Int, message: String) throws -> String {
+    let reply: JSONValue = .object([
+      "jsonrpc": .string("2.0"), "id": .string(id),
+      "error": .object(["code": .number(Double(code)), "message": .string(message)]),
+    ])
+    return String(decoding: try wireEncoder.encode(reply), as: UTF8.self)
+  }
+
   /// Exactly the text this request is transmitted as. Shared with the tests that pin the
   /// attachment budget against the frame ceiling, so the budget is measured against the wire
   /// rather than against arithmetic that only approximates it.
@@ -140,6 +150,10 @@ public enum InboundFrame: Equatable, Sendable {
   case response(id: Int, result: JSONValue)
   /// An error response: `{id, error:{message}}`.
   case failure(id: Int?, message: String)
+  /// A server→client request (`{id:"srq-…", method, params}`): the backend asks this client a
+  /// question and waits for a response frame carrying the same id. Only string ids qualify —
+  /// the ids this client mints are integers, so an integer-id `method` frame stays `.ignored`.
+  case serverRequest(id: String, method: String, params: JSONValue)
   /// A well-formed frame we don't act on (e.g. a non-`event` notification).
   case ignored
 
@@ -150,6 +164,11 @@ public enum InboundFrame: Equatable, Sendable {
       let type = params["type"]?.stringValue ?? ""
       let sessionID = params["session_id"]?.stringValue
       self = .event(sessionID: sessionID, GatewayEvent(type: type, payload: params["payload"]))
+      return
+    }
+
+    if let method = frame["method"]?.stringValue, let id = frame["id"]?.stringValue {
+      self = .serverRequest(id: id, method: method, params: frame["params"] ?? .null)
       return
     }
 

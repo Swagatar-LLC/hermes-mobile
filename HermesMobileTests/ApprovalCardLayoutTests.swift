@@ -258,7 +258,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
     XCTAssertTrue(chat.composer.becomeFirstResponder(), "sanity: the composer starts focusable")
 
     chat.store.send(
-      .gatewayEvent(.approvalRequest(ApprovalRequest(command: "rm -rf /", detail: "Danger"))))
+      .gatewayEvent(.approvalRequest(ApprovalRequest(command: "rm -rf /", detail: "Danger", requestID: "req-1"))))
     chat.relayout()
     XCTAssertFalse(
       chat.composer.isFirstResponder,
@@ -465,7 +465,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
   @MainActor
   func testCardFitsATightRegionByCompressingTheContentNotByLosingIt() throws {
     let host = hostedCard(
-      ApprovalRequest(command: Self.longCommand, detail: "Run the build"),
+      ApprovalRequest(command: Self.longCommand, detail: "Run the build", requestID: "req-1"),
       windowHeight: Self.tightRegionHeight,
       // A stand-in for the greedy transcript above the card: the card gets what's left.
       squeezedByGreedySibling: true
@@ -518,7 +518,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
   /// blocked while a card stands, so what is off screen there is the user's own focused field.
   func testTheCardsCompressedFittingSizeIsPinned() throws {
     let host = hostedCard(
-      ApprovalRequest(command: Self.longCommand, detail: Self.longDetail),
+      ApprovalRequest(command: Self.longCommand, detail: Self.longDetail, requestID: "req-1"),
       windowHeight: 200,
       squeezedByGreedySibling: true
     )
@@ -575,7 +575,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
   /// it: off the accessibility tree, after flipping the toggle the way a tap does
   /// (`accessibilityActivate()`; SwiftUI draws the switch, so there is no `UISwitch` to set).
   func testFlippingTheSessionToggleRetitlesTheButtonOnScreen() throws {
-    let host = hostedCard(ApprovalRequest(command: "rm -rf build", detail: "Run the build"))
+    let host = hostedCard(ApprovalRequest(command: "rm -rf build", detail: "Run the build", requestID: "req-1"))
     let window = try XCTUnwrap(windows.last)
 
     XCTAssertTrue(
@@ -726,9 +726,11 @@ final class ApprovalCardLayoutTests: XCTestCase {
     }
 
     // Isolated to the command: same request shape (detail + toggle), command present or not.
-    let bare = ApprovalRequest(command: nil, detail: "Delete the build directory", patternKey: "rm")
+    let bare = ApprovalRequest(
+      command: nil, detail: "Delete the build directory", patternKey: "rm", requestID: "req-1")
     let carrying = ApprovalRequest(
-      command: "rm -rf build/", detail: "Delete the build directory", patternKey: "rm")
+      command: "rm -rf build/", detail: "Delete the build directory", patternKey: "rm",
+      requestID: "req-1")
     XCTAssertEqual(
       bare.offersSessionApproval, carrying.offersSessionApproval,
       "Sanity: only the command differs")
@@ -951,7 +953,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
     line: UInt = #line
   ) throws -> UIScrollView {
     let host = hostedCard(
-      ApprovalRequest(command: command, detail: "Run the build"),
+      ApprovalRequest(command: command, detail: "Run the build", requestID: "req-1"),
       dynamicType: dynamicType,
       windowHeight: windowHeight
     )
@@ -964,7 +966,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
   /// The height the card asks for at ``viewportWidth`` — what `ChatView`'s `VStack` has to
   /// find room for, buttons included.
   private func cardHeight(for command: String) -> CGFloat {
-    fittedHeight(of: hostedCard(ApprovalRequest(command: command, detail: "Run the build")))
+    fittedHeight(of: hostedCard(ApprovalRequest(command: command, detail: "Run the build", requestID: "req-1")))
   }
 
   /// The height the card asks for with **no window and no layout pass** — the shape that
@@ -972,7 +974,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
   private func unmeasuredCardHeight(for command: String) -> CGFloat {
     UIHostingController(
       rootView: ApprovalCardView(
-        request: ApprovalRequest(command: command, detail: "Run the build"),
+        request: ApprovalRequest(command: command, detail: "Run the build", requestID: "req-1"),
         onApprove: { _ in }, onDeny: {}
       )
       .dynamicTypeSize(.large)
@@ -1049,7 +1051,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
     // the token is the card's view identity.
     if raiseACard {
       state.present(
-        interaction ?? .approval(ApprovalRequest(command: Self.longCommand, detail: detail)))
+        interaction ?? .approval(ApprovalRequest(command: Self.longCommand, detail: detail, requestID: "req-1")))
     }
     let store = Store(initialState: state) { ChatFeature() } withDependencies: {
       // Don't open a real socket during layout.

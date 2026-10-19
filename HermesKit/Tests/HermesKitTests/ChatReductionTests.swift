@@ -2280,6 +2280,70 @@ struct ChatReductionTests {
     return store
   }
 
+  // MARK: Snapshot approvals (`session.resume` → `pending_approval`, gateway 0.21.6+764)
+
+  private let pendingWire = #"{"session_id":"live123","resumed":"stored123","running":true,"pending_approval":{"request_id":"req-snap","command":"rm -rf /tmp/x","description":"Delete","choices":["once","session","deny"]}}"#
+
+  private func decodeResume(_ json: String) throws -> ActivateResponse {
+    try JSONDecoder().decode(ActivateResponse.self, from: Data(json.utf8))
+  }
+
+  @Test func resumeSnapshotDecodesThePendingApprovalWithItsRequestID() throws {
+    let response = try decodeResume(pendingWire)
+    #expect(response.pendingApproval == ApprovalRequest(
+      command: "rm -rf /tmp/x", detail: "Delete", requestID: "req-snap", choices: ["once", "session", "deny"]
+    ))
+    #expect(try decodeResume(#"{"session_id":"live123"}"#).pendingApproval == nil)
+  }
+
+  @Test func hydrateRestoresTheRealApprovalWithItsIDInsteadOfTheRecoveredCard() async throws {
+    var initial = ChatFeature.State(connection: conn)
+    initial.expectsPendingApproval = true // a push tap armed the generic-card hint
+    let store = recoveryStore(initial)
+
+    await store.send(.activateResult(.success(try decodeResume(pendingWire))))
+    guard case let .approval(request) = store.state.pendingInteraction else {
+      Issue.record("expected the snapshot approval card"); return
+    }
+    #expect(request.requestID == "req-snap")
+    #expect(request.canApprove)
+    #expect(store.state.expectsPendingApproval == false)
+    await store.send(.teardown)
+  }
+
+  /// A foreground re-hydrate of the SAME request must not re-raise the card: that would bump
+  /// the identity token and wipe the user's "approve all" toggle / scroll mid-decision.
+  @Test func rehydrateOfTheSameRequestKeepsTheStandingCard() async throws {
+    let store = recoveryStore(ChatFeature.State(connection: conn))
+    await store.send(.activateResult(.success(try decodeResume(pendingWire))))
+    let token = store.state.pendingInteractionToken
+    await store.send(.activateResult(.success(try decodeResume(pendingWire))))
+    #expect(store.state.pendingInteractionToken == token)
+    await store.send(.teardown)
+  }
+
+  /// Server-authoritative: a different oldest request replaces the standing card.
+  @Test func rehydrateWithADifferentRequestReplacesTheStandingCard() async throws {
+    let store = recoveryStore(ChatFeature.State(connection: conn))
+    await store.send(.activateResult(.success(try decodeResume(pendingWire))))
+    let other = pendingWire.replacingOccurrences(of: "req-snap", with: "req-next")
+    await store.send(.activateResult(.success(try decodeResume(other))))
+    guard case let .approval(request) = store.state.pendingInteraction else {
+      Issue.record("expected an approval card"); return
+    }
+    #expect(request.requestID == "req-next")
+    await store.send(.teardown)
+  }
+
+  /// A snapshot approval on a turn the server reports as stopped is stale → no phantom card.
+  @Test func snapshotApprovalOnAStoppedTurnIsDropped() async throws {
+    let store = recoveryStore(ChatFeature.State(connection: conn))
+    let stopped = pendingWire.replacingOccurrences(of: #""running":true"#, with: #""running":false"#)
+    await store.send(.activateResult(.success(try decodeResume(stopped))))
+    #expect(store.state.pendingInteraction == nil)
+    await store.send(.teardown)
+  }
+
   @Test func hydrateWithHintOnRunningTurnSynthesizesRecoveredCard() async {
     // The approval push fired while the socket was down; the tap set the hint. Hydrate
     // reports the turn still running and no real request arrived → the generic
@@ -2297,12 +2361,15 @@ struct ChatReductionTests {
       #expect(request.detail?.isEmpty == false)
     }
 
-    // Double hydrate of the same running turn: the hint was consumed on the first pass,
-    // so after the user answers the card a re-hydrate must NOT re-synthesize it.
+    // The recovered card has no `request_id`, so it cannot be answered from the phone at all
+    // (fail closed): the response is refused with an explanation and the card stays.
     await store.send(.respondToApproval(approve: false, all: false))
-    #expect(store.state.pendingInteraction == nil)
+    #expect(store.state.errorBanner == ChatFeature.unanswerableApprovalMessage)
+    #expect(store.state.pendingInteraction == .approval(ChatFeature.recoveredApprovalRequest))
+    // Double hydrate of the same running turn: the hint was consumed on the first pass, so a
+    // re-hydrate neither re-synthesizes nor replaces the standing card.
     await store.send(.activateResult(.success(activateResponse(running: true))))
-    #expect(store.state.pendingInteraction == nil)
+    #expect(store.state.pendingInteraction == .approval(ChatFeature.recoveredApprovalRequest))
     #expect(store.state.expectsPendingApproval == false)
 
     await store.send(.teardown)

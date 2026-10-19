@@ -14,7 +14,15 @@ final class FakeTransport: WebSocketTransport, @unchecked Sendable {
   private var _sent: [String] = []
   private let onSend: @Sendable (_ frame: String, _ inbound: AsyncStream<String>.Continuation) -> Void
 
-  init(onSend: @escaping @Sendable (String, AsyncStream<String>.Continuation) -> Void = { _, _ in }) {
+  /// Every connection opens with a `client.capabilities` request that all later requests wait
+  /// behind; a silent fake would stall them, so it is answered here unless a test withholds it.
+  private let answersHandshake: Bool
+
+  init(
+    answersHandshake: Bool = true,
+    onSend: @escaping @Sendable (String, AsyncStream<String>.Continuation) -> Void = { _, _ in }
+  ) {
+    self.answersHandshake = answersHandshake
     let (stream, continuation) = AsyncStream<String>.makeStream()
     inboundContinuation = continuation
     iterator = stream.makeAsyncIterator()
@@ -30,6 +38,11 @@ final class FakeTransport: WebSocketTransport, @unchecked Sendable {
 
   func send(_ text: String) async throws {
     lock.withLock { _sent.append(text) }
+    if answersHandshake, let frame = try? JSONDecoder().decode(JSONValue.self, from: Data(text.utf8)),
+       frame["method"]?.stringValue == "client.capabilities", let id = frame["id"]?.intValue {
+      inboundContinuation.yield(#"{"jsonrpc":"2.0","id":\#(id),"result":{"server_requests":["approval"]}}"#)
+      return
+    }
     onSend(text, inboundContinuation)
   }
 
@@ -43,6 +56,15 @@ final class FakeTransport: WebSocketTransport, @unchecked Sendable {
     inboundContinuation.finish()
   }
   func inject(_ frame: String) { inboundContinuation.yield(frame) }
+
+  /// Sent frames for one JSON-RPC method (the connection also sends its own `client.capabilities`).
+  func frames(method: String) -> [String] {
+    sent.filter { (try? JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)))?["method"]?.stringValue == method }
+  }
+  /// Sent frames that are replies to a server request (carry no `method`).
+  var replies: [JSONValue] {
+    sent.compactMap { try? JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }.filter { $0["method"] == nil }
+  }
 }
 
 private func requestID(_ frame: String) -> Int? {
@@ -66,7 +88,7 @@ private func requestID(_ frame: String) -> Int? {
     #expect(result == .object(["status": .string("streaming")]))
 
     // The outbound frame is a well-formed JSON-RPC request.
-    let sent = try #require(transport.sent.first)
+    let sent = try #require(transport.frames(method: "prompt.submit").first)
     let decoded = try JSONDecoder().decode(JSONValue.self, from: Data(sent.utf8))
     #expect(decoded["method"]?.stringValue == "prompt.submit")
     #expect(decoded["jsonrpc"]?.stringValue == "2.0")
@@ -648,3 +670,124 @@ struct GatewayTicketMintTests {
   }
 }
 } // extension RESTTransportSuite
+
+/// Gateway 0.21.6+764 delivers a blocking approval ONLY as a server→client request
+/// (`{id:"srq-…", method:"approval", params:{request_id, command, choices…}}`), and withdraws the
+/// queue entry at once when the attached WebSocket never advertised `server_requests`
+/// (`tui_gateway/server_requests.py`, #112548). The client must therefore advertise, surface the
+/// approval WITH its `request_id`, and answer — never ignore — every request it cannot display.
+@MainActor @Suite struct ServerRequestTests {
+  private let url = URL(string: "http://test.local:9119")!
+
+  @Test func connectionAdvertisesServerRequestHandling() async throws {
+    let transport = FakeTransport()
+    let client = HermesGatewayClient.make { _ in transport }
+    let stream = client.connect(url, .token("t"))
+    defer { withExtendedLifetime(stream) {} }
+
+    await waitUntil { !transport.frames(method: "client.capabilities").isEmpty }
+    let frame = try #require(transport.frames(method: "client.capabilities").first)
+    let decoded = try JSONDecoder().decode(JSONValue.self, from: Data(frame.utf8))
+    #expect(decoded["params"]?["server_requests"]?.boolValue == true)
+  }
+
+  /// The gateway withdraws an approval the moment it is raised on a socket that has not yet
+  /// advertised `server_requests`, and `session.resume` / `slash.exec` run on a worker pool, so
+  /// the handshake must be ANSWERED before any other request is transmitted — not merely sent
+  /// first. The fake holds the capabilities reply back to force the ordering.
+  @Test func noRequestIsTransmittedUntilTheCapabilityHandshakeIsAnswered() async throws {
+    let transport = FakeTransport(answersHandshake: false) { frame, inbound in
+      guard let decoded = try? JSONDecoder().decode(JSONValue.self, from: Data(frame.utf8)),
+            decoded["method"]?.stringValue != "client.capabilities", let id = decoded["id"]?.intValue
+      else { return } // the capabilities reply is withheld
+      inbound.yield(#"{"jsonrpc":"2.0","id":\#(id),"result":{}}"#)
+    }
+    let client = HermesGatewayClient.make { _ in transport }
+    let stream = client.connect(url, .token("t"))
+    defer { withExtendedLifetime(stream) {} }
+
+    let resume = Task { try await client.send("session.resume", .object([:])) }
+    await waitUntil { !transport.frames(method: "client.capabilities").isEmpty }
+    for _ in 0..<200 { await Task.yield() } // ample opportunity for a racing send to overtake
+    #expect(transport.frames(method: "session.resume").isEmpty, "sent before the handshake was answered")
+
+    let capsFrame = try #require(transport.sent.first)
+    let capsID = try #require(requestID(capsFrame))
+    transport.inject(#"{"jsonrpc":"2.0","id":\#(capsID),"result":{"server_requests":["approval"]}}"#)
+
+    _ = try await resume.value
+    let methods = transport.sent.compactMap {
+      (try? JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)))?["method"]?.stringValue
+    }
+    #expect(methods == ["client.capabilities", "session.resume"])
+  }
+
+  /// An agent that predates the handshake answers it with an error: requests must still flow.
+  @Test func aRejectedHandshakeDoesNotBlockRequests() async throws {
+    let transport = FakeTransport(answersHandshake: false) { frame, inbound in
+      guard let decoded = try? JSONDecoder().decode(JSONValue.self, from: Data(frame.utf8)),
+            let id = decoded["id"]?.intValue else { return }
+      if decoded["method"]?.stringValue == "client.capabilities" {
+        inbound.yield(#"{"jsonrpc":"2.0","id":\#(id),"error":{"code":-32601,"message":"unknown method"}}"#)
+      } else {
+        inbound.yield(#"{"jsonrpc":"2.0","id":\#(id),"result":{"ok":true}}"#)
+      }
+    }
+    let client = HermesGatewayClient.make { _ in transport }
+    let stream = client.connect(url, .token("t"))
+    defer { withExtendedLifetime(stream) {} }
+
+    let result = try await client.send("session.resume", .object([:]))
+    #expect(result["ok"]?.boolValue == true)
+  }
+
+  @Test func approvalServerRequestSurfacesWithItsRequestID() async throws {
+    let transport = FakeTransport()
+    let client = HermesGatewayClient.make { _ in transport }
+    let stream = client.connect(url, .token("t"))
+
+    transport.inject(#"{"jsonrpc":"2.0","id":"srq-aa","method":"approval","params":{"session_id":"s","request_id":"req-7","command":"rm -rf /tmp/x","description":"Delete","choices":["once","session","deny"]}}"#)
+
+    var iterator = stream.makeAsyncIterator()
+    #expect(await iterator.next() == .approvalRequest(ApprovalRequest(
+      command: "rm -rf /tmp/x", detail: "Delete", requestID: "req-7", choices: ["once", "session", "deny"]
+    )))
+    // The user's answer travels as the ID-scoped `approval.respond` RPC (which returns the
+    // resolved count); the server settles the open request itself — no srq reply is sent.
+    #expect(transport.replies.isEmpty)
+  }
+
+  /// No `request_id` means no way to bind a response: fail closed by answering the server
+  /// request with an error, which makes the gateway WITHDRAW the entry (command never runs)
+  /// instead of parking the agent for the whole approvals.timeout behind an invisible prompt.
+  @Test func approvalServerRequestWithoutRequestIDIsRefusedNotShown() async throws {
+    let transport = FakeTransport()
+    let client = HermesGatewayClient.make { _ in transport }
+    let stream = client.connect(url, .token("t"))
+    defer { withExtendedLifetime(stream) {} }
+
+    transport.inject(#"{"jsonrpc":"2.0","id":"srq-bb","method":"approval","params":{"session_id":"s","command":"rm x"}}"#)
+
+    await waitUntil { !transport.replies.isEmpty }
+    let reply = try #require(transport.replies.first)
+    #expect(reply["id"]?.stringValue == "srq-bb")
+    #expect(reply["error"]?["code"]?.intValue == -32602)
+    #expect(reply["result"] == nil)
+  }
+
+  /// clarify / sudo / secret / window bridges are not rendered by this client: decline with
+  /// -32601 (the gateway treats that as "no handler" and settles at once) rather than silence.
+  @Test func unsupportedServerRequestIsAnsweredMethodNotFound() async throws {
+    let transport = FakeTransport()
+    let client = HermesGatewayClient.make { _ in transport }
+    let stream = client.connect(url, .token("t"))
+    defer { withExtendedLifetime(stream) {} }
+
+    transport.inject(#"{"jsonrpc":"2.0","id":"srq-cc","method":"clarify","params":{"session_id":"s","questions":[]}}"#)
+
+    await waitUntil { !transport.replies.isEmpty }
+    let reply = try #require(transport.replies.first)
+    #expect(reply["id"]?.stringValue == "srq-cc")
+    #expect(reply["error"]?["code"]?.intValue == -32601)
+  }
+}

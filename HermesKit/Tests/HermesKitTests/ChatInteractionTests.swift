@@ -7,7 +7,7 @@ import Testing
 @MainActor
 struct ChatInteractionTests {
   private let conn = ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "t")
-  private let request = ApprovalRequest(command: "rm -rf /tmp/x", detail: "Delete /tmp/x")
+  private let request = ApprovalRequest(command: "rm -rf /tmp/x", detail: "Delete /tmp/x", requestID: "req-1")
   private func uuid(_ n: Int) -> UUID {
     UUID(uuidString: "00000000-0000-0000-0000-\(String(format: "%012x", n))")!
   }
@@ -76,34 +76,122 @@ struct ChatInteractionTests {
     await store.finish()
 
     #expect(sent.value?["method"]?.stringValue == "approval.respond")
-    // Approvals are session-queue-resolved: no request_id is sent.
-    #expect(sent.value?["params"]?["request_id"] == nil)
+    // The response is bound to the displayed request, and never asks for queue-wide resolution.
+    #expect(sent.value?["params"]?["request_id"]?.stringValue == "req-1")
     #expect(sent.value?["params"]?["choice"]?.stringValue == "once")
-    #expect(sent.value?["params"]?["all"]?.boolValue == false)
+    #expect(sent.value?["params"]?["all"] == nil)
     // resolved >= 1 → the optimistic row stays "Approved" (no feedback action fires —
     // an unasserted receive would fail this exhaustive store).
     #expect(store.state.transcript[id: uuid(0)]?.kind == .status(kind: "approval", text: "Approved"))
     #expect(store.state.errorBanner == nil)
   }
 
-  @Test func recoveredApprovalCannotSendBlindApproval() async {
-    var initial = readyState()
-    initial.pendingInteraction = .approval(ChatFeature.recoveredApprovalRequest)
-    let store = TestStore(initialState: initial) { ChatFeature() }
-    await store.send(.respondToApproval(approve: true, all: false))
-    await store.send(.respondToApproval(approve: true, all: true))
-    #expect(store.state.pendingInteraction == .approval(ChatFeature.recoveredApprovalRequest))
-    #expect(store.state.transcript.isEmpty)
+  // MARK: Request binding — FIFO reproduction (the gateway queue is per-session, not per-card)
+
+  /// A live approval as the gateway sends it: `request_id` is the queue entry's own id.
+  private func wireApproval(_ id: String, command: String = "rm -rf /tmp/x") -> GatewayEvent {
+    GatewayEvent(type: "approval.request", payload: .object([
+      "request_id": .string(id), "command": .string(command), "description": .string("Delete"),
+    ]))
   }
 
-  @Test func commandlessApprovalCanStillBeDenied() async {
+  private func respondParams(
+    state: ChatFeature.State, approve: Bool = true, all: Bool = false, events: [GatewayEvent]
+  ) async -> JSONValue? {
+    let sent = LockIsolated<JSONValue?>(nil)
+    let store = TestStore(initialState: state) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable method, params in
+        if method == "approval.respond" { sent.setValue(params) }
+        return .object(["resolved": .number(1)])
+      }
+    }
+    store.exhaustivity = .off
+    for event in events { await store.send(.gatewayEvent(event)) }
+    await store.send(.respondToApproval(approve: approve, all: all))
+    await store.finish()
+    return sent.value
+  }
+
+  /// Old behaviour: the id was discarded and the response resolved the session's FIFO head,
+  /// so whatever the card showed, the OLDEST queued command was the one authorized.
+  @Test func approvalResponseCarriesTheDisplayedRequestID() async {
+    let params = await respondParams(state: readyState(), events: [wireApproval("req-A")])
+    #expect(params?["request_id"]?.stringValue == "req-A")
+  }
+
+  /// A queued A is replaced on screen by B: answering must bind to B, never to the FIFO head A.
+  @Test func replacedCardRespondsToTheNewRequestNotTheQueueHead() async {
+    let params = await respondParams(
+      state: readyState(), events: [wireApproval("req-A", command: "ls"), wireApproval("req-B", command: "rm -rf /")]
+    )
+    #expect(params?["request_id"]?.stringValue == "req-B")
+  }
+
+  /// Identical command text, distinct queue entries: only the id tells them apart.
+  @Test func identicalCommandsAreToldApartByRequestID() async {
+    let params = await respondParams(
+      state: readyState(), events: [wireApproval("req-1"), wireApproval("req-2")]
+    )
+    #expect(params?["request_id"]?.stringValue == "req-2")
+  }
+
+  /// "Approve all in this session" must scope to the one displayed request: `choice: session`
+  /// plus its id, never `all: true` (which would resolve every other queued approval blind).
+  @Test func sessionChoiceIsScopedToOneRequestAndNeverSendsAll() async {
+    let params = await respondParams(state: readyState(), all: true, events: [wireApproval("req-A")])
+    #expect(params?["choice"]?.stringValue == "session")
+    #expect(params?["request_id"]?.stringValue == "req-A")
+    #expect(params?["all"]?.boolValue != true)
+  }
+
+  /// The push-tap recovered card has no command and no `request_id`: it may neither approve
+  /// nor deny — a blind FIFO respond could resolve a different queued command.
+  @Test func recoveredApprovalCannotSendAnyBlindResponse() async {
     var initial = readyState()
     initial.pendingInteraction = .approval(ChatFeature.recoveredApprovalRequest)
-    let sent = LockIsolated<String?>(nil)
+    let sentAny = LockIsolated(false)
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable _, _ in sentAny.setValue(true); return .object([:]) }
+    }
+    await store.send(.respondToApproval(approve: true, all: false)) {
+      $0.errorBanner = ChatFeature.unanswerableApprovalMessage
+    }
+    // Repeats (approve-all, deny) change nothing further and still send nothing.
+    await store.send(.respondToApproval(approve: true, all: true))
+    await store.send(.respondToApproval(approve: false, all: false))
+    await store.finish()
+    #expect(store.state.pendingInteraction == .approval(ChatFeature.recoveredApprovalRequest))
+    #expect(store.state.transcript.isEmpty)
+    #expect(sentAny.value == false)
+  }
+
+  /// Missing id on a REAL card (legacy gateway event): fail closed, card stays, nothing sent,
+  /// the user is told why instead of a button silently doing nothing.
+  @Test func approvalWithoutRequestIDFailsClosedAndSaysWhy() async {
+    var initial = readyState()
+    initial.pendingInteraction = .approval(ApprovalRequest(command: "rm -rf /tmp/x"))
+    let sentAny = LockIsolated(false)
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable _, _ in sentAny.setValue(true); return .object([:]) }
+    }
+    await store.send(.respondToApproval(approve: true, all: false)) {
+      $0.errorBanner = ChatFeature.unanswerableApprovalMessage
+    }
+    await store.finish()
+    #expect(store.state.pendingInteraction != nil)
+    #expect(sentAny.value == false)
+  }
+
+  /// A command-less card WITH an id (nothing to authorize) can still be denied, by id.
+  @Test func commandlessApprovalWithIDCanStillBeDeniedByID() async {
+    var initial = readyState()
+    initial.pendingInteraction = .approval(ApprovalRequest(requestID: "req-9"))
+    let sent = LockIsolated<JSONValue?>(nil)
     let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.hermesGateway.send = { @Sendable method, params in
-        sent.setValue(method == "approval.respond" ? params["choice"]?.stringValue : nil)
+        if method == "approval.respond" { sent.setValue(params) }
         return .object(["resolved": .number(1)])
       }
     }
@@ -112,10 +200,17 @@ struct ChatInteractionTests {
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Denied"))]
     }
     await store.finish()
-    #expect(sent.value == "deny")
+    #expect(sent.value?["choice"]?.stringValue == "deny")
+    #expect(sent.value?["request_id"]?.stringValue == "req-9")
+    // …but approving it is still refused (no command to authorize).
+    await store.send(.gatewayEvent(.approvalRequest(ApprovalRequest(requestID: "req-9")))) {
+      $0.pendingInteraction = .approval(ApprovalRequest(requestID: "req-9"))
+      $0.pendingInteractionToken = 1
+    }
+    await store.send(.respondToApproval(approve: true, all: false))
   }
 
-  @Test func approveAllSendsAllTrue() async {
+  @Test func approveAllInSessionIsScopedToTheRequestAndNeverSendsAll() async {
     let sent = LockIsolated<JSONValue?>(nil)
     var initial = readyState()
     initial.pendingInteraction = .approval(request)
@@ -123,7 +218,7 @@ struct ChatInteractionTests {
       $0.uuid = .incrementing
       $0.hermesGateway.send = { @Sendable _, params in
         sent.setValue(params)
-        return .object(["resolved": .number(3)])
+        return .object(["resolved": .number(1)])
       }
     }
 
@@ -133,9 +228,29 @@ struct ChatInteractionTests {
     }
     await store.finish()
 
-    #expect(sent.value?["all"]?.boolValue == true)
-    // "Approve all in this session" persists the pattern for the session.
+    // "Approve all in this session" persists the matched pattern for the session — it does NOT
+    // resolve the rest of the queue: one id, `choice: session`, no `all`.
     #expect(sent.value?["choice"]?.stringValue == "session")
+    #expect(sent.value?["request_id"]?.stringValue == "req-1")
+    #expect(sent.value?["all"] == nil)
+  }
+
+  /// The server's `choices` exclude `session` (smart-denied / no-session entries): the reducer
+  /// must not turn "approve all" into a `session` choice the server did not offer — and must not
+  /// quietly downgrade it to a one-shot approval either. Nothing is sent, the card stays.
+  @Test func approveAllIsRefusedWhenTheServerDoesNotOfferSession() async {
+    var initial = readyState()
+    initial.pendingInteraction = .approval(
+      ApprovalRequest(command: "rm -rf /tmp/x", requestID: "req-1", choices: ["once", "deny"]))
+    let sentAny = LockIsolated(false)
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable _, _ in sentAny.setValue(true); return .object([:]) }
+    }
+    await store.send(.respondToApproval(approve: true, all: true))
+    await store.finish()
+    #expect(sentAny.value == false)
+    #expect(store.state.pendingInteraction != nil)
+    #expect(store.state.transcript.isEmpty)
   }
 
   @Test func denySendsDenyChoice() async {
@@ -146,7 +261,7 @@ struct ChatInteractionTests {
       $0.uuid = .incrementing
       $0.hermesGateway.send = { @Sendable _, params in
         sent.setValue(params)
-        return .object([:])
+        return .object(["resolved": .number(1)])
       }
     }
 
@@ -157,10 +272,8 @@ struct ChatInteractionTests {
     await store.finish()
 
     #expect(sent.value?["choice"]?.stringValue == "deny")
-    // A result with no "resolved" key (older agent) is lenient success: no feedback
-    // action, the optimistic "Denied" row stands, no banner.
-    #expect(store.state.transcript[id: uuid(0)]?.kind == .status(kind: "approval", text: "Denied"))
-    #expect(store.state.errorBanner == nil)
+    #expect(sent.value?["request_id"]?.stringValue == "req-1")
+    #expect(sent.value?["all"] == nil)
   }
 
   // resolved == 0 → the server's per-session queue was already empty (handled on another
@@ -184,6 +297,26 @@ struct ChatInteractionTests {
       $0.transcript[id: self.uuid(0)]?.kind = .status(kind: "approval", text: "Already handled elsewhere")
     }
     #expect(store.state.errorBanner == nil) // not an error — just honest feedback
+  }
+
+  // A result with no `resolved` count cannot confirm that the bound request was resolved —
+  // the optimistic "Approved" must not stand as fact.
+  @Test func approveWithUnconfirmedResultPatchesRowInsteadOfClaimingApproved() async {
+    var initial = readyState()
+    initial.pendingInteraction = .approval(request)
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable _, _ in .object([:]) }
+    }
+
+    await store.send(.respondToApproval(approve: true, all: false)) {
+      $0.pendingInteraction = nil
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Approved"))]
+    }
+    await store.receive(\.approvalRespondUnconfirmed) {
+      $0.transcript[id: self.uuid(0)]?.kind = .status(kind: "approval", text: "Approval not confirmed")
+    }
+    #expect(store.state.errorBanner == nil)
   }
 
   // The acknowledged race: a hydrate replaced the transcript wholesale (deterministic

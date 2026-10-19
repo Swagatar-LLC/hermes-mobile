@@ -97,7 +97,7 @@ import Testing
 
   @Test func approvalRequest() throws {
     // Real wire shape (hermes-agent tools/approval.py): command/description/pattern_key(s),
-    // and crucially NO request_id — approvals are session-queue-resolved.
+    // (legacy shape without request_id: still decodes, but cannot be answered — see `canRespond`).
     let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"approval.request","session_id":"s","payload":{"command":"rm -rf /tmp/x","description":"Delete /tmp/x","pattern_key":"rm","pattern_keys":["rm"]}}}"#)
     #expect(f == .event(sessionID: "s", .approvalRequest(ApprovalRequest(
       command: "rm -rf /tmp/x", detail: "Delete /tmp/x", patternKey: "rm", patternKeys: ["rm"]
@@ -113,6 +113,35 @@ import Testing
       Issue.record("expected .approvalRequest, got \(f)")
       return
     }
+  }
+
+  /// Gateway 0.21.6+764: every approval carries the queue entry's own `request_id` and the
+  /// server's `choices` (`tui_gateway/server.py::_approval_request_payload`).
+  @Test func approvalRequestCarriesRequestIDAndChoices() throws {
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"approval.request","session_id":"s","payload":{"request_id":"r-9","command":"rm foo","choices":["once","deny"]}}}"#)
+    guard case let .event(_, .approvalRequest(request)) = f else {
+      Issue.record("expected .approvalRequest, got \(f)"); return
+    }
+    #expect(request.requestID == "r-9")
+    #expect(request.choices == ["once", "deny"])
+  }
+
+  @Test func approvalChoicesGateWhatTheCardMayOffer() {
+    let id = "r-1"
+    // smart-denied / no-session entries: the server publishes a narrower ladder; honour it.
+    #expect(ApprovalRequest(command: "rm x", requestID: id, choices: ["once", "deny"]).offersSessionApproval == false)
+    #expect(ApprovalRequest(command: "rm x", requestID: id, choices: ["deny"]).canApprove == false)
+    #expect(ApprovalRequest(command: "rm x", requestID: id, choices: ["once", "session", "deny"]).offersSessionApproval)
+    // No `choices` field (older / partial payload): `?? true`, the shared capability pattern.
+    #expect(ApprovalRequest(command: "rm x", requestID: id).offersSessionApproval)
+    #expect(ApprovalRequest(command: "rm x", requestID: id).canApprove)
+  }
+
+  @Test func approvalWithoutRequestIDCannotBeAnswered() {
+    #expect(ApprovalRequest(command: "rm x").canRespond == false)
+    #expect(ApprovalRequest(command: "rm x", requestID: "").canRespond == false)
+    #expect(ApprovalRequest(command: "rm x").canApprove == false)
+    #expect(ApprovalRequest(command: "rm x", requestID: "r").canRespond)
   }
 
   @Test func clarifyRequestWithChoices() throws {

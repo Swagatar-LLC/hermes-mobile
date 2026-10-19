@@ -429,7 +429,8 @@ final class ChatSnapshotTests: SnapshotTestCase {
     let view = ApprovalCardView(
       request: ApprovalRequest(
         command: "rm -rf build/ && git clean -fdx",
-        detail: "Delete the build directory and all untracked files"
+        detail: "Delete the build directory and all untracked files",
+        requestID: "req-1"
       ),
       onApprove: { _ in },
       onDeny: {}
@@ -452,7 +453,8 @@ final class ChatSnapshotTests: SnapshotTestCase {
         // One fixture, shared with the measured suite that asserts this shape's geometry —
         // two copies would drift and the two suites would stop describing the same card.
         command: ApprovalCardLayoutTests.longCommand,
-        detail: "Rebuild every target and re-run the full suite"
+        detail: "Rebuild every target and re-run the full suite",
+        requestID: "req-1"
       ),
       onApprove: { _ in },
       onDeny: {}

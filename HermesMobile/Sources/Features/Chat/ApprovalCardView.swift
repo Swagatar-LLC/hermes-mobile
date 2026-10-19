@@ -152,6 +152,8 @@ struct ApprovalCardView: View {
           Text("Deny").frame(maxWidth: .infinity)
         }
         .buttonStyle(.bordered)
+        // No `request_id` → nothing to bind a response to; the reducer refuses it too.
+        .disabled(!request.canRespond)
         if request.canApprove {
           Button { onApprove(approveAll) } label: {
             Text(Self.approveTitle(all: approveAll)).frame(maxWidth: .infinity)
@@ -212,8 +214,18 @@ struct ApprovalCardView: View {
               .frame(maxWidth: .infinity, alignment: .leading)
           }
 
-          // Hidden on the push-tap-recovered card (#30 workaround): with no command and no
-          // command to show, even a single approval would authorize an unseen action.
+          // A real request the phone cannot bind a response to (an agent that sends no
+          // `request_id`). The recovered card already explains itself in its detail.
+          if !request.canRespond, request.command != nil {
+            Text(ChatFeature.unanswerableApprovalMessage)
+              .font(.footnote)
+              .foregroundStyle(.secondary)
+              .fixedSize(horizontal: false, vertical: true)
+              .frame(maxWidth: .infinity, alignment: .leading)
+          }
+
+          // Hidden unless the request can be approved (#30 workaround's command-less card, or
+          // one with no `request_id`): a session-wide whitelist must never ride on a blind answer.
           // Its state is mirrored on the Approve button, which is rigid: with a long command
           // this control is below the fold, and a session-wide whitelist must never be
           // committed from a switch the user cannot see at the moment they approve.

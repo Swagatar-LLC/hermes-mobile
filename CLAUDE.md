@@ -163,6 +163,12 @@ bullets below are the compressed rules.
   guarded by strict `canBranch` gates with a client-held `BranchSeed` recovery protocol
   (probe-before-seed-replay; no probe budget). The trickiest state machine in the app —
   read `docs/features/message-actions-and-branching.md` before touching it.
+- **Approval responses are bound to the displayed `request_id`** — `approval.respond` sends
+  `{session_id, request_id, choice}`, never `all` (the server queue is FIFO; an unbound or
+  `all:true` response resolves requests the user never saw). No id ⇒ fail closed (nothing sent).
+  Live approvals are the gateway's `approval` **server request**: the socket advertises
+  `client.capabilities {server_requests:true}` and errors every request it can't render. Details:
+  `docs/features/approvals.md`.
 - **Approval/clarify/secret cards**: a pinned button row over ONE bounded scrollable
   region (`BoundedHeightLayout`) — never plain stacked `Text`. Every card is keyed on
   the monotonic `pendingInteractionToken`; **raise cards through `State.present(_:)`,
