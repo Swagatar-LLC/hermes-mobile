@@ -98,8 +98,8 @@ public struct ChatFeature {
       pendingInteractionToken &+= 1
     }
     /// One-shot push-tap approval-recovery hint (client-side workaround for hermes-agent
-    /// #30: an `approval.request` that fired while the socket was down is gone — the
-    /// server does not re-surface pending approvals on `session.resume`). Set by
+    /// #30: an approval that fired while the socket was down is gone, and agents before gateway
+    /// 0.21.6+764 do not re-surface it as `session.resume`'s `pending_approval`). Set by
     /// `AppFeature` when an approval-typed push tap puts this session's chat on screen;
     /// consumed (reset to `false`) by the next hydrate, which synthesizes a generic
     /// command-less approval card when the turn is still `running` and no real blocking
@@ -770,6 +770,9 @@ public struct ChatFeature {
     /// missing-key (older agent, lenient decode) success sends nothing — the optimistic
     /// row is already correct.
     case approvalRespondResult(rowID: ChatRow.ID, resolved: Int?)
+    /// `approval.respond` succeeded but its result carried no `resolved` count, so the bound
+    /// request is not confirmed resolved — the optimistic row must not stand as fact.
+    case approvalRespondUnconfirmed(rowID: ChatRow.ID)
     case respondToClarify(answer: String)
     case respondToSecret(value: String)
     case copyRow(id: ChatRow.ID)
@@ -1398,9 +1401,15 @@ public struct ChatFeature {
 
       case let .respondToApproval(approve, all):
         guard case let .approval(request) = state.pendingInteraction,
-              !approve || request.canApprove,
               let sessionID = state.liveSessionID
         else { return .none }
+        // Fail closed: with no `request_id` a response would resolve the server's FIFO head,
+        // which need not be the request on screen. Send nothing and say why.
+        guard let requestID = request.requestID, request.canRespond else {
+          state.errorBanner = Self.unanswerableApprovalMessage
+          return .none
+        }
+        guard !approve || request.canApprove else { return .none }
         state.pendingInteraction = nil
         // Answering ANY approval moots the push-tap recovery hint (#30 workaround) — an
         // armed hint left behind (e.g. a tap whose consuming hydrate raced past it) must
@@ -1410,28 +1419,27 @@ public struct ChatFeature {
         state.transcript.append(
           ChatRow(id: rowID, kind: .status(kind: "approval", text: approve ? "Approved" : "Denied"))
         )
-        // Choice vocabulary matches `tools/approval.py`: "deny" blocks; "once" allows
-        // just this command; "session" persists the pattern for the rest of the session
-        // (the "Approve all in this session" toggle). Approvals are resolved by the
-        // server's per-session queue, so NO `request_id` is sent (unlike clarify/secret);
-        // `all` maps to `resolve_all` to clear any other queued approvals at once.
-        // The command-presence guard only blocks recovered commandless cards. A concurrent
-        // queue-head change can still authorize a different request; binding needs server IDs.
+        // Choice vocabulary matches `tools/approval.py`: "deny" blocks; "once" allows just
+        // this command; "session" also persists the matched pattern for the rest of the
+        // session (the "Approve all in this session" toggle). The response is bound to the
+        // displayed request by `request_id` and NEVER sends `all` — queue-wide resolution would
+        // authorize requests the user has not seen.
         let choice = approve ? (all ? "session" : "once") : "deny"
         return .run { [gateway] send in
           do {
             let result = try await gateway.send("approval.respond", .object([
               "session_id": .string(sessionID),
+              "request_id": .string(requestID),
               "choice": .string(choice),
-              "all": .bool(all),
             ]))
-            // The server answers `{"resolved": n}` — the count of queue entries this
-            // respond resolved. `0` means the queue was already empty (handled on another
-            // client, or a recovered-card blind respond after the fact), so the optimistic
-            // row must stop claiming "Approved"/"Denied". A missing key (older agent) is
-            // treated as success — decode leniently, only actionable outcomes feed back.
-            if result["resolved"]?.intValue == 0 {
-              await send(.approvalRespondResult(rowID: rowID, resolved: 0))
+            // The server answers `{"resolved": n}`: how many queue entries this respond
+            // resolved. `0` → already handled elsewhere (an id that is no longer queued is
+            // a verified no-op, never a FIFO fallback). A missing count cannot confirm the
+            // bound request was resolved, so it is surfaced rather than assumed.
+            switch result["resolved"]?.intValue {
+            case 0: await send(.approvalRespondResult(rowID: rowID, resolved: 0))
+            case nil: await send(.approvalRespondUnconfirmed(rowID: rowID))
+            default: break
             }
           } catch {
             await send(.approvalRespondResult(rowID: rowID, resolved: nil))
@@ -1455,6 +1463,10 @@ public struct ChatFeature {
           // "Approved"/"Denied" row is already correct, no action needed).
           break
         }
+        return .none
+
+      case let .approvalRespondUnconfirmed(rowID):
+        state.transcript[id: rowID]?.kind = .status(kind: "approval", text: "Approval not confirmed")
         return .none
 
       case let .respondToClarify(answer):
@@ -2716,16 +2728,20 @@ public struct ChatFeature {
     .cancellable(id: CancelID.hydrate, cancelInFlight: true)
   }
 
-  /// The synthetic approval request the push-tap recovery path synthesizes (#30
-  /// workaround): the real `approval.request` fired while the socket was down and its
-  /// payload is unrecoverable (the push deliberately carries no content per the
-  /// generic-body privacy rule), so the recovered card is command-less with honest copy.
-  /// No command is available, so the card can only deny; approving would blindly
-  /// resolve the server's per-session FIFO queue (approvals have no `request_id`).
+  /// Shown when a response is refused because the card has no `request_id` to bind it to.
+  public static let unanswerableApprovalMessage =
+    "This approval can't be answered from the phone. Answer it on another device, or stop the turn."
+
+  /// The synthetic approval request the push-tap recovery path synthesizes (#30 workaround)
+  /// when the hydrate carries no `pending_approval` snapshot (agents before gateway 0.21.6+764):
+  /// the real request fired while the socket was down and its payload is unrecoverable (the push
+  /// deliberately carries no content per the generic-body privacy rule), so the card is
+  /// command-less with honest copy. It has no `request_id` either, so it can be neither approved
+  /// nor denied from here — a blind respond would resolve the server's FIFO head.
   public static let recoveredApprovalRequest = ApprovalRequest(
     command: nil,
     detail: "The agent is waiting for approval of a command, but the details couldn't "
-      + "be recovered after reconnecting. Reconnect to see the command, or deny it."
+      + "be recovered after reconnecting. Answer it on another device, or stop the turn."
   )
 
   /// Apply a server-authoritative `ActivateResponse` into state: bind the live/stored ids,
@@ -2772,6 +2788,17 @@ public struct ChatFeature {
     // real blocking request. Not running → the approval resolved/denied/timed out while
     // we were detached → drop silently (no phantom card). Consuming the hint first means
     // a double hydrate of the same running turn can't synthesize twice.
+    // A server snapshot of the pending approval (with its `request_id`) wins over the
+    // synthetic card: it is the real request and can be answered. A re-hydrate of the SAME
+    // request leaves the standing card alone (re-raising would reset the user's toggle).
+    if running, let pending = response.pendingApproval, pending.canRespond {
+      state.expectsPendingApproval = false
+      if case let .approval(current) = state.pendingInteraction, current.requestID == pending.requestID {
+        // already showing it
+      } else {
+        state.present(.approval(pending))
+      }
+    }
     if state.expectsPendingApproval {
       state.expectsPendingApproval = false
       if running, state.pendingInteraction == nil {

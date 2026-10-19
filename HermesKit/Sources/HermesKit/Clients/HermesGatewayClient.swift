@@ -326,6 +326,11 @@ actor GatewayConnection {
   func start() {
     guard receiveTask == nil else { return }
     receiveTask = Task { [weak self] in await self?.receiveLoop() }
+    // Gateway 0.21.6+764 delivers blocking approvals ONLY as server→client requests and
+    // withdraws the queue entry at once when the socket never advertised handling them.
+    Task { [weak self] in
+      _ = try? await self?.send(method: "client.capabilities", params: .object(["server_requests": .bool(true)]))
+    }
   }
 
   func send(method: String, params: JSONValue) async throws -> JSONValue {
@@ -415,9 +420,34 @@ actor GatewayConnection {
         cancelTimeout(id)
         pending.removeValue(forKey: id)?.resume(throwing: GatewayError.server(message))
       }
+    case let .serverRequest(id, method, params):
+      handleServerRequest(id: id, method: method, params: params)
     case .ignored:
       break
     }
+  }
+
+  /// The only server request this client renders is `approval`; it is surfaced as an event
+  /// carrying its `request_id` and answered by the ID-scoped `approval.respond` RPC (the server
+  /// settles the open request itself, so no reply frame is sent). Everything else — including an
+  /// approval with no `request_id`, which could not be bound — is answered with an error: the
+  /// gateway then withdraws the request at once (fail closed, the command never runs) instead of
+  /// parking the agent for the whole timeout behind a prompt nobody can see.
+  private func handleServerRequest(id: String, method: String, params: JSONValue) {
+    if method == "approval" {
+      if let request = params.decoded(ApprovalRequest.self), request.canRespond {
+        events.yield(.approvalRequest(request))
+      } else {
+        reply(id: id, code: -32602, message: "approval request has no request_id")
+      }
+    } else {
+      reply(id: id, code: -32601, message: "Method not found")
+    }
+  }
+
+  private func reply(id: String, code: Int, message: String) {
+    guard let text = try? JSONRPCRequest.errorReplyText(id: id, code: code, message: message) else { return }
+    Task { [transport] in try? await transport.send(text) }
   }
 
   private func finish(error: GatewayError) {

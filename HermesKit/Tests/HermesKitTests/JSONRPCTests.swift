@@ -32,6 +32,32 @@ import Testing
     #expect(try InboundFrame(data: data) == .ignored)
   }
 
+  // MARK: Server→client requests
+
+  @Test func serverRequestFrameIsClassifiedWithItsStringID() throws {
+    // `tui_gateway/server_requests.py` `ServerRequest.frame()`: string `srq-…` id + method + params.
+    let data = Data(#"{"jsonrpc":"2.0","id":"srq-1a2b","method":"approval","params":{"session_id":"s","request_id":"r1","command":"rm x"}}"#.utf8)
+    #expect(try InboundFrame(data: data) == .serverRequest(
+      id: "srq-1a2b", method: "approval",
+      params: .object(["session_id": .string("s"), "request_id": .string("r1"), "command": .string("rm x")])
+    ))
+  }
+
+  @Test func stringIDResponseIsNotMistakenForAServerRequest() throws {
+    // No `method` → a response to something we sent; we only mint integer ids, so it is ignored.
+    let data = Data(#"{"jsonrpc":"2.0","id":"srq-1","result":{}}"#.utf8)
+    #expect(try InboundFrame(data: data) == .ignored)
+  }
+
+  @Test func errorReplyEncodesAJSONRPCErrorForTheRequestID() throws {
+    let text = try JSONRPCRequest.errorReplyText(id: "srq-9", code: -32601, message: "Method not found")
+    let decoded = try JSONDecoder().decode(JSONValue.self, from: Data(text.utf8))
+    #expect(decoded == .object([
+      "jsonrpc": .string("2.0"), "id": .string("srq-9"),
+      "error": .object(["code": .number(-32601), "message": .string("Method not found")]),
+    ]))
+  }
+
   // MARK: JSONValue Codable
 
   @Test func roundTripsEveryKind() throws {

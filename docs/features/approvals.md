@@ -1,8 +1,46 @@
-# Approval cards: layout (#65) & push-tap recovery (#30 workaround)
+# Approval cards: request binding, layout (#65) & push-tap recovery (#30 workaround)
 
 Normative invariants moved out of `CLAUDE.md` (2026-08-14 restructure). The short rules live in
 `CLAUDE.md` → "Transcript & chat UI"; this doc is the full contract. Design history:
 `docs/plans/completed/`.
+
+## Every response is bound to the displayed request's `request_id`
+
+Verified against hermes-agent `tui_gateway/` (gateway 0.21.6+764). The server's approval queue is
+a per-session FIFO: `approval.respond` WITHOUT a `request_id` resolves the oldest entry — not
+necessarily the one on screen — and `all: true` resolves every entry blind. So:
+
+- `approval.respond` always sends `{session_id, request_id, choice}` and **never `all`**. An id
+  that is no longer queued resolves `0` (a verified no-op, never a FIFO fallback). "Approve all in
+  this session" is `choice: "session"` scoped to that one id (it persists the matched pattern; it
+  does not clear the queue).
+- **No `request_id` ⇒ fail closed**: `ApprovalRequest.canRespond` is false, the reducer sends
+  nothing (approve *or* deny), keeps the card and sets `unanswerableApprovalMessage`; Deny is
+  disabled in the view. Applies to the legacy `approval.request` event without an id and to the
+  push-tap recovered card.
+- `choices` is honoured when present (absent ⇒ `?? true`): no `once` ⇒ no Approve, no `session`
+  ⇒ no toggle.
+- A result with no `resolved` count is **not** success: the optimistic row becomes "Approval not
+  confirmed" (`approvalRespondUnconfirmed`); `0` → "Already handled elsewhere".
+
+**Where the id comes from.** On this gateway a blocking approval is NOT an `approval.request`
+event: it is the **server→client request** `{id:"srq-…", method:"approval", params:{session_id,
+request_id, command, description, choices, …}}`, and the gateway **withdraws the queue entry at
+once** if the attached WebSocket never sent `client.capabilities {server_requests: true}`.
+`GatewayConnection.start()` therefore advertises it, `InboundFrame.serverRequest` classifies the
+frame (string ids only), and `handleServerRequest` surfaces `approval` as `.approvalRequest`
+(no reply frame — the ID-scoped RPC resolves it and the server settles the open request). Every
+other server request (clarify/sudo/secret/window bridges) and an `approval` with no `request_id`
+is answered with a JSON-RPC error (-32601 / -32602), which the gateway treats as "client cannot
+answer": it withdraws the entry (fail closed — the command never runs) instead of parking the
+agent until `approvals.timeout`. `session.resume` also returns the oldest unresolved approval as
+`pending_approval` (same shape, with its id); `applyActivate` raises it on a running turn, and a
+re-hydrate of the same id leaves the standing card (and the user's toggle) alone.
+
+**Known limits.** Only the OLDEST pending approval is restored on hydrate, and a newer live
+request replaces a standing card; a displaced entry is not re-surfaced and times out as a deny.
+`request.cancel` is not handled (a stale card answers `0`). Clarify/sudo/secret are not emitted as
+`*.request` events by this gateway either, so those cards are unreachable here (out of scope).
 
 ## Push-tap approval recovery (hermes-agent #30 workaround)
 
@@ -21,17 +59,16 @@ hydrate clear any standing `.approval` card + the hint (a card must never outliv
 lock the composer), and answering any approval clears the hint too. A real `approval.request`
 always overwrites the synthetic card AND clears the hint.
 
-This works because approvals have **no `request_id`** — `approval.respond` resolves a per-session
-FIFO, and the `{"resolved": n}` result surfaces the outcome: `0` → patch the optimistic status
-row to "Already handled elsewhere" (blind respond on an empty queue is a verified server no-op);
-RPC failure → `errorBanner` (no swallowed `try?`).
+The synthesized card has no `request_id`, so under the binding rule above it can be neither approved
+nor denied from the phone (the copy tells the user to answer elsewhere or stop the turn). It is
+the fallback for agents whose `session.resume` carries no `pending_approval`; on gateway 0.21.6+764
+the real card is restored instead. RPC failure → `errorBanner` (no swallowed `try?`).
 
 The **"Approve all in this session" toggle is content-gated**
 (`ApprovalRequest.offersSessionApproval`): hidden on the command-less/pattern-less recovered
-card — a blind approve must not whitelist an unseen danger pattern session-wide. **No
+card — a blind approve must not whitelist an unseen danger pattern. **No
 push-payload change** — the generic-body privacy rule stands; composes with #30 (a re-surfaced
-real event just replaces the generic card). Clarify recovery is out of scope (needs the real
-event's `request_id`).
+real event just replaces the generic card). Clarify recovery is out of scope.
 
 ## The approval card is a pinned button row over ONE bounded, scrollable region (#65)
 

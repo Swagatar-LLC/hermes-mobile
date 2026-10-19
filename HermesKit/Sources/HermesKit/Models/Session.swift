@@ -146,6 +146,9 @@ public struct ActivateResponse: Equatable, Sendable, Decodable {
   public var info: SessionInfo?
   public var running: Bool?
   public var inflight: SessionInflight?
+  /// The oldest unresolved approval (`pending_approval`, with its `request_id`), so a client
+  /// that missed the live request can restore the card and bind its answer.
+  public var pendingApproval: ApprovalRequest?
 
   enum CodingKeys: String, CodingKey {
     case sessionID = "session_id"
@@ -157,11 +160,13 @@ public struct ActivateResponse: Equatable, Sendable, Decodable {
     // whose stored/persisted id key is `session_key`.
     case sessionKey = "session_key"
     case messages, info, running, inflight
+    case pendingApproval = "pending_approval"
   }
 
   public init(
     sessionID: String, storedSessionID: String? = nil, messages: [SessionMessage] = [],
-    info: SessionInfo? = nil, running: Bool? = nil, inflight: SessionInflight? = nil
+    info: SessionInfo? = nil, running: Bool? = nil, inflight: SessionInflight? = nil,
+    pendingApproval: ApprovalRequest? = nil
   ) {
     self.sessionID = sessionID
     self.storedSessionID = storedSessionID
@@ -169,6 +174,7 @@ public struct ActivateResponse: Equatable, Sendable, Decodable {
     self.info = info
     self.running = running
     self.inflight = inflight
+    self.pendingApproval = pendingApproval
   }
 
   public init(from decoder: Decoder) throws {
@@ -185,6 +191,7 @@ public struct ActivateResponse: Equatable, Sendable, Decodable {
     info = try? c.decodeIfPresent(SessionInfo.self, forKey: .info)
     running = try? c.decodeIfPresent(Bool.self, forKey: .running)
     inflight = try? c.decodeIfPresent(SessionInflight.self, forKey: .inflight)
+    pendingApproval = (try? c.decodeIfPresent(ApprovalRequest.self, forKey: .pendingApproval)) ?? nil
   }
 }
 

@@ -2670,22 +2670,14 @@ struct AppFeatureTests {
     // Badge bookkeeping unchanged: tap marked, open cleared.
     #expect(store.state.pendingApprovalSessionIDs.isEmpty)
 
-    // The recovered card cannot authorize an unseen command, even if an approval action
-    // is dispatched programmatically. Deny remains available to resolve the blocked turn.
+    // The recovered card has no `request_id` and no command: it can neither approve nor deny
+    // (a blind respond would resolve the server's FIFO head). Nothing is sent; the card stays.
     await store.send(.liveChat(.respondToApproval(approve: true, all: false)))
-    #expect(respondParams.value == nil)
-    #expect(store.state.liveChat?.pendingInteraction == .approval(ChatFeature.recoveredApprovalRequest))
     await store.send(.liveChat(.respondToApproval(approve: false, all: false)))
     await store.finish()
-    let params = respondParams.value
-    #expect(params?["session_id"] == .string("live1"))
-    #expect(params?["choice"] == .string("deny"))
-    #expect(params?["all"] == .bool(false))
-    #expect(params?["request_id"] == nil)
-    #expect(store.state.liveChat?.pendingInteraction == nil)
-    #expect(store.state.liveChat?.errorBanner == nil)
-    let lastRow = store.state.liveChat?.transcript.last
-    #expect(lastRow?.kind == .status(kind: "approval", text: "Denied"))
+    #expect(respondParams.value == nil)
+    #expect(store.state.liveChat?.pendingInteraction == .approval(ChatFeature.recoveredApprovalRequest))
+    #expect(store.state.liveChat?.errorBanner == ChatFeature.unanswerableApprovalMessage)
 
     await store.send(.liveChat(.teardown))
   }
