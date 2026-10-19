@@ -19,7 +19,8 @@ necessarily the one on screen — and `all: true` resolves every entry blind. So
   disabled in the view. Applies to the legacy `approval.request` event without an id and to the
   push-tap recovered card.
 - `choices` is honoured when present (absent ⇒ `?? true`): no `once` ⇒ no Approve, no `session`
-  ⇒ no toggle.
+  ⇒ no toggle, and the reducer refuses an approve-all (`choice: session`) the server did not offer
+  — nothing sent, never downgraded to `once`.
 - A result with no `resolved` count is **not** success: the optimistic row becomes "Approval not
   confirmed" (`approvalRespondUnconfirmed`); `0` → "Already handled elsewhere".
 
@@ -27,7 +28,7 @@ necessarily the one on screen — and `all: true` resolves every entry blind. So
 event: it is the **server→client request** `{id:"srq-…", method:"approval", params:{session_id,
 request_id, command, description, choices, …}}`, and the gateway **withdraws the queue entry at
 once** if the attached WebSocket never sent `client.capabilities {server_requests: true}`.
-`GatewayConnection.start()` therefore advertises it, `InboundFrame.serverRequest` classifies the
+`GatewayConnection` therefore advertises it — and **every other request waits for that handshake's answer** (result, error from an older agent, or its timeout), not merely its transmission, because `session.resume`/`slash.exec` run on a gateway worker pool and could otherwise race an approval onto an unadvertised socket — `InboundFrame.serverRequest` classifies the
 frame (string ids only), and `handleServerRequest` surfaces `approval` as `.approvalRequest`
 (no reply frame — the ID-scoped RPC resolves it and the server settles the open request). Every
 other server request (clarify/sudo/secret/window bridges) and an `approval` with no `request_id`

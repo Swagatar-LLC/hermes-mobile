@@ -14,7 +14,15 @@ final class FakeTransport: WebSocketTransport, @unchecked Sendable {
   private var _sent: [String] = []
   private let onSend: @Sendable (_ frame: String, _ inbound: AsyncStream<String>.Continuation) -> Void
 
-  init(onSend: @escaping @Sendable (String, AsyncStream<String>.Continuation) -> Void = { _, _ in }) {
+  /// Every connection opens with a `client.capabilities` request that all later requests wait
+  /// behind; a silent fake would stall them, so it is answered here unless a test withholds it.
+  private let answersHandshake: Bool
+
+  init(
+    answersHandshake: Bool = true,
+    onSend: @escaping @Sendable (String, AsyncStream<String>.Continuation) -> Void = { _, _ in }
+  ) {
+    self.answersHandshake = answersHandshake
     let (stream, continuation) = AsyncStream<String>.makeStream()
     inboundContinuation = continuation
     iterator = stream.makeAsyncIterator()
@@ -30,6 +38,11 @@ final class FakeTransport: WebSocketTransport, @unchecked Sendable {
 
   func send(_ text: String) async throws {
     lock.withLock { _sent.append(text) }
+    if answersHandshake, let frame = try? JSONDecoder().decode(JSONValue.self, from: Data(text.utf8)),
+       frame["method"]?.stringValue == "client.capabilities", let id = frame["id"]?.intValue {
+      inboundContinuation.yield(#"{"jsonrpc":"2.0","id":\#(id),"result":{"server_requests":["approval"]}}"#)
+      return
+    }
     onSend(text, inboundContinuation)
   }
 
@@ -676,6 +689,56 @@ struct GatewayTicketMintTests {
     let frame = try #require(transport.frames(method: "client.capabilities").first)
     let decoded = try JSONDecoder().decode(JSONValue.self, from: Data(frame.utf8))
     #expect(decoded["params"]?["server_requests"]?.boolValue == true)
+  }
+
+  /// The gateway withdraws an approval the moment it is raised on a socket that has not yet
+  /// advertised `server_requests`, and `session.resume` / `slash.exec` run on a worker pool, so
+  /// the handshake must be ANSWERED before any other request is transmitted — not merely sent
+  /// first. The fake holds the capabilities reply back to force the ordering.
+  @Test func noRequestIsTransmittedUntilTheCapabilityHandshakeIsAnswered() async throws {
+    let transport = FakeTransport(answersHandshake: false) { frame, inbound in
+      guard let decoded = try? JSONDecoder().decode(JSONValue.self, from: Data(frame.utf8)),
+            decoded["method"]?.stringValue != "client.capabilities", let id = decoded["id"]?.intValue
+      else { return } // the capabilities reply is withheld
+      inbound.yield(#"{"jsonrpc":"2.0","id":\#(id),"result":{}}"#)
+    }
+    let client = HermesGatewayClient.make { _ in transport }
+    let stream = client.connect(url, .token("t"))
+    defer { withExtendedLifetime(stream) {} }
+
+    let resume = Task { try await client.send("session.resume", .object([:])) }
+    await waitUntil { !transport.frames(method: "client.capabilities").isEmpty }
+    for _ in 0..<200 { await Task.yield() } // ample opportunity for a racing send to overtake
+    #expect(transport.frames(method: "session.resume").isEmpty, "sent before the handshake was answered")
+
+    let capsFrame = try #require(transport.sent.first)
+    let capsID = try #require(requestID(capsFrame))
+    transport.inject(#"{"jsonrpc":"2.0","id":\#(capsID),"result":{"server_requests":["approval"]}}"#)
+
+    _ = try await resume.value
+    let methods = transport.sent.compactMap {
+      (try? JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)))?["method"]?.stringValue
+    }
+    #expect(methods == ["client.capabilities", "session.resume"])
+  }
+
+  /// An agent that predates the handshake answers it with an error: requests must still flow.
+  @Test func aRejectedHandshakeDoesNotBlockRequests() async throws {
+    let transport = FakeTransport(answersHandshake: false) { frame, inbound in
+      guard let decoded = try? JSONDecoder().decode(JSONValue.self, from: Data(frame.utf8)),
+            let id = decoded["id"]?.intValue else { return }
+      if decoded["method"]?.stringValue == "client.capabilities" {
+        inbound.yield(#"{"jsonrpc":"2.0","id":\#(id),"error":{"code":-32601,"message":"unknown method"}}"#)
+      } else {
+        inbound.yield(#"{"jsonrpc":"2.0","id":\#(id),"result":{"ok":true}}"#)
+      }
+    }
+    let client = HermesGatewayClient.make { _ in transport }
+    let stream = client.connect(url, .token("t"))
+    defer { withExtendedLifetime(stream) {} }
+
+    let result = try await client.send("session.resume", .object([:]))
+    #expect(result["ok"]?.boolValue == true)
   }
 
   @Test func approvalServerRequestSurfacesWithItsRequestID() async throws {

@@ -308,6 +308,7 @@ actor GatewayConnection {
   private var timeoutTasks: [Int: Task<Void, Never>] = [:]
   private var receiveTask: Task<Void, Never>?
   private var isFinished = false
+  private var handshake: Task<Void, Never>?
 
   init(
     transport: any WebSocketTransport,
@@ -326,14 +327,33 @@ actor GatewayConnection {
   func start() {
     guard receiveTask == nil else { return }
     receiveTask = Task { [weak self] in await self?.receiveLoop() }
-    // Gateway 0.21.6+764 delivers blocking approvals ONLY as server→client requests and
-    // withdraws the queue entry at once when the socket never advertised handling them.
-    Task { [weak self] in
-      _ = try? await self?.send(method: "client.capabilities", params: .object(["server_requests": .bool(true)]))
+    _ = capabilityHandshake()
+  }
+
+  /// Gateway 0.21.6+764 delivers blocking approvals ONLY as server→client requests and withdraws
+  /// the queue entry the instant one is raised on a socket that has not advertised
+  /// `server_requests`; `session.resume` / `slash.exec` run on a worker pool, so a request that
+  /// overtakes the handshake can race an approval. Hence every other request waits for this
+  /// one's ANSWER (a result, an error from an agent that predates it, or its timeout) — never
+  /// just its transmission. Created once, by whichever of `start()` / the first `send` comes
+  /// first, so an immediate `send` after `connect` cannot slip past it.
+  private func capabilityHandshake() -> Task<Void, Never> {
+    if let handshake { return handshake }
+    let task = Task { [weak self] in
+      _ = try? await self?.submit(method: "client.capabilities", params: .object(["server_requests": .bool(true)]))
     }
+    handshake = task
+    return task
   }
 
   func send(method: String, params: JSONValue) async throws -> JSONValue {
+    await capabilityHandshake().value
+    return try await submit(method: method, params: params)
+  }
+
+  /// Register, transmit and await one request. Does NOT wait for the handshake (it is the
+  /// handshake's own path) — callers outside it go through `send`.
+  private func submit(method: String, params: JSONValue) async throws -> JSONValue {
     // Never register against a torn-down connection — that continuation would
     // never be resumed (the receive loop is gone), hanging the caller forever.
     guard !isFinished else { throw GatewayError.disconnected }

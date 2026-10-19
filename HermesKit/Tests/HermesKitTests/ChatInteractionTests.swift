@@ -235,6 +235,24 @@ struct ChatInteractionTests {
     #expect(sent.value?["all"] == nil)
   }
 
+  /// The server's `choices` exclude `session` (smart-denied / no-session entries): the reducer
+  /// must not turn "approve all" into a `session` choice the server did not offer — and must not
+  /// quietly downgrade it to a one-shot approval either. Nothing is sent, the card stays.
+  @Test func approveAllIsRefusedWhenTheServerDoesNotOfferSession() async {
+    var initial = readyState()
+    initial.pendingInteraction = .approval(
+      ApprovalRequest(command: "rm -rf /tmp/x", requestID: "req-1", choices: ["once", "deny"]))
+    let sentAny = LockIsolated(false)
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable _, _ in sentAny.setValue(true); return .object([:]) }
+    }
+    await store.send(.respondToApproval(approve: true, all: true))
+    await store.finish()
+    #expect(sentAny.value == false)
+    #expect(store.state.pendingInteraction != nil)
+    #expect(store.state.transcript.isEmpty)
+  }
+
   @Test func denySendsDenyChoice() async {
     let sent = LockIsolated<JSONValue?>(nil)
     var initial = readyState()

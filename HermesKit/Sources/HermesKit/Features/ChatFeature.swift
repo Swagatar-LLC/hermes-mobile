@@ -1410,6 +1410,9 @@ public struct ChatFeature {
           return .none
         }
         guard !approve || request.canApprove else { return .none }
+        // "Approve all" is `choice: session`; if the server's `choices` exclude it, refuse
+        // rather than send a choice it did not offer (or silently downgrade to `once`).
+        guard !(approve && all) || request.offersSessionApproval else { return .none }
         state.pendingInteraction = nil
         // Answering ANY approval moots the push-tap recovery hint (#30 workaround) — an
         // armed hint left behind (e.g. a tap whose consuming hydrate raced past it) must
