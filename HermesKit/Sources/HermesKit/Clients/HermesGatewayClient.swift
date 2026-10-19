@@ -452,9 +452,13 @@ public protocol WebSocketTransport: Sendable {
 
 final class URLSessionWebSocketTransport: WebSocketTransport, @unchecked Sendable {
   private let task: URLSessionWebSocketTask
+  private let guardedSession: URLSession
 
   init(url: URL, session: URLSession) {
-    task = session.webSocketTask(with: url)
+    // The handshake URL carries a token or ticket; no redirect may forward its query.
+    let guarded = URLSession(configuration: session.configuration, delegate: WebSocketRedirectGuard(), delegateQueue: nil)
+    guardedSession = guarded
+    task = guardedSession.webSocketTask(with: url)
     task.resume()
   }
 
@@ -472,6 +476,15 @@ final class URLSessionWebSocketTransport: WebSocketTransport, @unchecked Sendabl
 
   func cancel() {
     task.cancel(with: .goingAway, reason: nil)
+  }
+}
+
+private final class WebSocketRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+  func urlSession(
+    _ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void
+  ) {
+    completionHandler(nil)
   }
 }
 
@@ -552,7 +565,7 @@ private func wsTicketRequest(
   let data: Data
   let response: URLResponse
   do {
-    (data, response) = try await session.data(for: request)
+    (data, response) = try await credentialData(for: request, session: session)
   } catch {
     throw GatewayError.ticketUnavailable
   }

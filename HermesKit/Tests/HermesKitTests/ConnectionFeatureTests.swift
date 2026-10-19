@@ -73,6 +73,35 @@ private func oauthReadyState(providers: [AuthProvider] = [nousProvider]) -> Conn
 
 @MainActor
 struct ConnectionFeatureTests {
+  @Test func serverURLDefaultsToHTTPSAndRequiresExplicitLocalHTTP() {
+    #expect(parseServerURL("agent.example.com:9119")?.absoluteString == "https://agent.example.com:9119")
+    #expect(parseServerURL("mac.tailnet:9119")?.scheme == "https")
+    #expect(parseServerURL("http://mac.tailnet:9119")?.scheme == "http")
+    #expect(parseServerURL("http://192.168.1.4:9119") != nil)
+    #expect(parseServerURL("http://100.101.102.103:9119") != nil)
+    #expect(parseServerURL("http://agent.local:9119") != nil)
+    #expect(parseServerURL("http://[::1]:9119") != nil)
+    #expect(parseServerURL("http://[fd7a:115c:a1e0::1]:9119") != nil)
+    #expect(parseServerURL("http://[fe80::1%25en0]:9119") != nil)
+    #expect(parseServerURL("http://[2001:4860::8888]:9119") == nil)
+    #expect(parseServerURL("http://agent.example.ts.net:9119") != nil)
+    #expect(parseServerURL("http://agent.example.com:9119") == nil)
+    #expect(parseServerURL("http://mac.tailnet.attacker.example") == nil)
+    #expect(parseServerURL("http://8.8.8.8:9119") == nil)
+    #expect(parseServerURL("http://172.32.0.1:9119") == nil)
+    #expect(parseServerURL("ftp://mac.tailnet") == nil)
+    #expect(parseServerURL("https://user:secret@agent.example.com") == nil)
+  }
+
+  @Test func publicHTTPIsRejectedBeforeAnyProbeOrCredentialSend() async {
+    let store = TestStore(initialState: ConnectionFeature.State(serverURL: "http://agent.example.com", token: "secret")) {
+      ConnectionFeature()
+    }
+    await store.send(.serverFieldCommitted)
+    await store.receive(\.checkServer) { $0.status = .invalidURL }
+    await store.send(.connectTapped)
+  }
+
   @Test func reachableThenValidTokenConnectsAndStoresToken() async {
     let keychain = KeychainClient.inMemory()
     let preferences = PreferencesClient.inMemory()
@@ -100,7 +129,7 @@ struct ConnectionFeatureTests {
     await store.receive(\.delegate.connected)
 
     #expect(keychain.loadToken() == "secret")
-    #expect(preferences.loadServerURL() == "http://mac.tailnet:9119")
+    #expect(preferences.loadServerURL() == "https://mac.tailnet:9119")
   }
 
   @Test func unreachableServer() async {

@@ -89,24 +89,15 @@ public struct SettingsFeature {
       self.deleteSupported = deleteSupported
     }
 
-    /// The installed plugin is behind `PushSetup.minimumPluginVersion` AND the agent can pull
-    /// it in place → offer the one-tap update.
-    ///
-    /// Stays `false` once an update has been attempted: after a successful pull the hub reports
-    /// the NEW version off disk while the running agent still has the old code loaded, so
-    /// re-offering the button would be misleading — the outstanding action is a restart, which
-    /// only the user can do.
+    /// Kept for compatibility with existing settings state; no in-app update is offered.
     public var pluginUpdateAvailable: Bool {
-      guard pluginUpdate == .idle, let pushPlugin else { return false }
-      return pushPlugin.isOutdated && pushPlugin.canUpdateGit
+      false // No moving-branch update, even for a git checkout.
     }
 
-    /// The plugin is behind but the agent can't pull it (pip install, hand-copied directory,
-    /// or an agent too old to report `can_update_git`) → point the user at the chat prompt
-    /// instead of a button that would only 400.
+    /// Any outdated plugin requires manual review of an immutable commit.
     public var pluginUpdateNeedsManualSteps: Bool {
       guard pluginUpdate == .idle, let pushPlugin else { return false }
-      return pushPlugin.isOutdated && !pushPlugin.canUpdateGit
+      return pushPlugin.isOutdated
     }
 
     public var serverURLString: String { connection.baseURL.absoluteString }
@@ -139,7 +130,7 @@ public struct SettingsFeature {
     case askAgentToInstallTapped
     /// What the plugin hub reports about `hermes-push`, read on appearance.
     case pushPluginInfoLoaded(PushPluginInfo)
-    /// User tapped "Update plugin" — asks the agent to `git pull` it in place.
+    /// Legacy action: deliberately ignored, including from stale UI.
     case updatePluginTapped
     /// Outcome of that pull.
     case pluginUpdateResult(PluginUpdateOutcome)
@@ -214,20 +205,8 @@ public struct SettingsFeature {
         return .none
 
       case .updatePluginTapped:
-        guard state.pluginUpdate != .updating else { return .none }
-        state.pluginUpdate = .updating
-        return .run { [rest, connection = state.connection] send in
-          do {
-            let result = try await rest.updatePushPlugin(connection)
-            await send(.pluginUpdateResult(result.unchanged ? .alreadyCurrent : .updated))
-          } catch let error as RESTError {
-            // Surface the agent's own reason (not a git checkout, non-fast-forward, git
-            // missing) verbatim — the user has to act on it on their host.
-            await send(.pluginUpdateResult(.failed(error.message)))
-          } catch {
-            await send(.pluginUpdateResult(.failed(RESTError.unreachable.message)))
-          }
-        }
+        // Even a stale UI action must never call the privileged moving-branch endpoint.
+        return .none
 
       case let .pluginUpdateResult(outcome):
         switch outcome {

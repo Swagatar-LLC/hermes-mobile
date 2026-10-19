@@ -25,33 +25,14 @@ public enum PushSetup {
   /// release. Every bump nags every user whose agent is behind.
   public static let minimumPluginVersion = "0.2.0"
 
-  /// Defined ONCE here so the reducer can seed a new chat's composer with it (and the info
-  /// sheet no longer renders it). A plain, ready-to-send instruction the user reviews before
-  /// sending — it asks the agent to install the plugin **as a directory plugin** (the only
-  /// install that mounts its registration route) and enable + restart.
-  ///
-  /// It covers BOTH a fresh install and an update in place: `git clone` into an existing
-  /// non-empty directory fails outright, and by the time this prompt matters most the user
-  /// usually already has an older copy installed. This is the fallback path — Settings offers
-  /// a one-tap update when the plugin directory is a git checkout the agent can pull.
+  /// Pre-filled guidance only; never ask the privileged agent to fetch a moving branch.
   public static let installPrompt = """
-    Please install (or update) the hermes-push plugin so I can receive push notifications on \
-    my phone. It has to be a directory plugin (a plain pip install loads the hooks but does \
-    NOT mount the registration route the app needs).
-
-    If ~/.hermes/plugins/hermes-push already exists, update it in place:
-    git -C ~/.hermes/plugins/hermes-push pull --ff-only
-
-    Otherwise clone it fresh:
-    git clone https://github.com/goncharik/hermes-mobile-push-plugin.git ~/.hermes/plugins/hermes-push
-    (and `pip install fastapi` if it isn't already available)
-
-    Then make sure it's enabled with `hermes plugins enable hermes-push` (or add `hermes-push` \
-    under `plugins.enabled` in ~/.hermes/config.yaml) — it's fine if it already is.
-
-    Finally, RESTART the Hermes web/dashboard server (not just the chat process). The plugin's \
-    REST routes only mount when that server starts up, and a pull only changes files on disk — \
-    the restart is what actually loads the new code. After restarting, tell me it's done.
+    I want to use the hermes-push plugin. Do not install, update, fetch, enable, or restart it yet.
+    First identify an immutable commit and the exact dependency versions, audit that source and
+    its relay/APNs behavior with me, and obtain my explicit approval for the pinned version.
+    Do not pull or clone a live branch or install unreviewed dependencies on my host.
+    Once approved, explain the manual directory-plugin installation and server restart steps
+    for that exact commit. A package-only installation does not mount the registration route.
     """
 }
 

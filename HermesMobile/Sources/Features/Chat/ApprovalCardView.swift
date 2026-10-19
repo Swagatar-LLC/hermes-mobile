@@ -152,10 +152,12 @@ struct ApprovalCardView: View {
           Text("Deny").frame(maxWidth: .infinity)
         }
         .buttonStyle(.bordered)
-        Button { onApprove(approveAll) } label: {
-          Text(Self.approveTitle(all: approveAll)).frame(maxWidth: .infinity)
+        if request.canApprove {
+          Button { onApprove(approveAll) } label: {
+            Text(Self.approveTitle(all: approveAll)).frame(maxWidth: .infinity)
+          }
+          .buttonStyle(.borderedProminent)
         }
-        .buttonStyle(.borderedProminent)
       }
     }
     .padding()
@@ -211,12 +213,11 @@ struct ApprovalCardView: View {
           }
 
           // Hidden on the push-tap-recovered card (#30 workaround): with no command and no
-          // pattern to show, "Approve all" would whitelist an unseen danger pattern for the
-          // whole session — a blind single approve is the most the recovery copy covers.
+          // command to show, even a single approval would authorize an unseen action.
           // Its state is mirrored on the Approve button, which is rigid: with a long command
           // this control is below the fold, and a session-wide whitelist must never be
           // committed from a switch the user cannot see at the moment they approve.
-          if request.offersSessionApproval {
+          if request.canApprove && request.offersSessionApproval {
             Toggle("Approve all in this session", isOn: $approveAll)
               .font(.footnote)
           }

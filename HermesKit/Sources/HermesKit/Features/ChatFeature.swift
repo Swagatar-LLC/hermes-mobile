@@ -1397,7 +1397,8 @@ public struct ChatFeature {
         return drainQueueIfReady(into: &state)
 
       case let .respondToApproval(approve, all):
-        guard case .approval = state.pendingInteraction,
+        guard case let .approval(request) = state.pendingInteraction,
+              !approve || request.canApprove,
               let sessionID = state.liveSessionID
         else { return .none }
         state.pendingInteraction = nil
@@ -1414,6 +1415,8 @@ public struct ChatFeature {
         // (the "Approve all in this session" toggle). Approvals are resolved by the
         // server's per-session queue, so NO `request_id` is sent (unlike clarify/secret);
         // `all` maps to `resolve_all` to clear any other queued approvals at once.
+        // The command-presence guard only blocks recovered commandless cards. A concurrent
+        // queue-head change can still authorize a different request; binding needs server IDs.
         let choice = approve ? (all ? "session" : "once") : "deny"
         return .run { [gateway] send in
           do {
@@ -2717,13 +2720,12 @@ public struct ChatFeature {
   /// workaround): the real `approval.request` fired while the socket was down and its
   /// payload is unrecoverable (the push deliberately carries no content per the
   /// generic-body privacy rule), so the recovered card is command-less with honest copy.
-  /// `ApprovalCardView` already renders a `command == nil` request (detail-only card);
-  /// no `isSynthesized` marker exists anywhere — the card is distinguished only by its
-  /// content, and `approval.respond` works identically (approvals have no `request_id`).
+  /// No command is available, so the card can only deny; approving would blindly
+  /// resolve the server's per-session FIFO queue (approvals have no `request_id`).
   public static let recoveredApprovalRequest = ApprovalRequest(
     command: nil,
     detail: "The agent is waiting for approval of a command, but the details couldn't "
-      + "be recovered after reconnecting. Approve only if you know what it's doing."
+      + "be recovered after reconnecting. Reconnect to see the command, or deny it."
   )
 
   /// Apply a server-authoritative `ActivateResponse` into state: bind the live/stored ids,

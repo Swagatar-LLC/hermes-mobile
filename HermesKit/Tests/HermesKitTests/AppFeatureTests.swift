@@ -2670,20 +2670,22 @@ struct AppFeatureTests {
     // Badge bookkeeping unchanged: tap marked, open cleared.
     #expect(store.state.pendingApprovalSessionIDs.isEmpty)
 
-    // Approve the recovered card: the respond is session-queue-scoped (session_id + choice
-    // + all, NO request_id — the synthetic card never had one, by design), and the server's
-    // `resolved: 1` keeps the optimistic "Approved" row (no error, no re-patch).
+    // The recovered card cannot authorize an unseen command, even if an approval action
+    // is dispatched programmatically. Deny remains available to resolve the blocked turn.
     await store.send(.liveChat(.respondToApproval(approve: true, all: false)))
+    #expect(respondParams.value == nil)
+    #expect(store.state.liveChat?.pendingInteraction == .approval(ChatFeature.recoveredApprovalRequest))
+    await store.send(.liveChat(.respondToApproval(approve: false, all: false)))
     await store.finish()
     let params = respondParams.value
     #expect(params?["session_id"] == .string("live1"))
-    #expect(params?["choice"] == .string("once"))
+    #expect(params?["choice"] == .string("deny"))
     #expect(params?["all"] == .bool(false))
     #expect(params?["request_id"] == nil)
     #expect(store.state.liveChat?.pendingInteraction == nil)
     #expect(store.state.liveChat?.errorBanner == nil)
     let lastRow = store.state.liveChat?.transcript.last
-    #expect(lastRow?.kind == .status(kind: "approval", text: "Approved"))
+    #expect(lastRow?.kind == .status(kind: "approval", text: "Denied"))
 
     await store.send(.liveChat(.teardown))
   }

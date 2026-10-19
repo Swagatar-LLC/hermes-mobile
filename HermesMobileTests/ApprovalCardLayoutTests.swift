@@ -553,6 +553,18 @@ final class ApprovalCardLayoutTests: XCTestCase {
     )
   }
 
+  func testRecoveredCardOffersDenyButNeverApprove() throws {
+    let host = hostedCard(ChatFeature.recoveredApprovalRequest)
+    let window = try XCTUnwrap(windows.last)
+    host.view.setNeedsLayout()
+    host.view.layoutIfNeeded()
+    let labels = Self.accessibilityLabels(in: window)
+    XCTAssertTrue(labels.contains("Deny"))
+    XCTAssertFalse(labels.contains("Approve"))
+    XCTAssertFalse(labels.contains("Approve all"))
+    XCTAssertFalse(labels.contains("Approve all in this session"))
+  }
+
   /// The same mirror, **rendered** — the wiring, not just the pure function behind it.
   ///
   /// `approveTitle(all:)` being right says nothing about the button being handed the toggle's

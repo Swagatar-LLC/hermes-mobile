@@ -2,11 +2,10 @@ import HermesKit
 import SwiftUI
 
 /// Presentation-only info sheet explaining how push notifications work and offering to ask
-/// the agent to install — or update — the `hermes-push` plugin (pre-fills a new chat), plus a
+/// the agent to review a pinned `hermes-push` plugin (pre-fills a new chat), plus a
 /// "Later" snooze on the not-installed path. A small text link opens the plugin's GitHub page.
 ///
-/// It deliberately talks about the **plugin only** — the relay/gateway is publisher infra
-/// the user never has to know about. The actions are surfaced as closures so both call
+/// The publisher relay must be audited before installation. Actions are closures so both call
 /// sites (the sessions-list auto-present and Settings) reuse the same view.
 struct PushSetupGuideView: View {
   @Environment(\.dismiss) private var dismiss
@@ -42,7 +41,7 @@ struct PushSetupGuideView: View {
           point(
             "It runs on your own agent",
             icon: "lock.shield",
-            text: "Notifications come from a small plugin on your own Hermes agent, relayed to Apple. Only a generic alert (e.g. “Approval needed”) leaves your server — your messages and data never do."
+            text: "Notifications use a plugin on your agent and an external relay. Review the plugin's pinned source, dependencies, and relay behavior before enabling it."
           )
 
           VStack(spacing: 12) {
@@ -50,7 +49,7 @@ struct PushSetupGuideView: View {
               onAskAgent()
             } label: {
               Label(
-                pluginInstalled ? "Ask agent to update plugin" : "Ask agent to install plugin",
+                pluginInstalled ? "Review a pinned plugin update" : "Review the plugin before installing",
                 systemImage: "sparkles"
               )
               .frame(maxWidth: .infinity)
