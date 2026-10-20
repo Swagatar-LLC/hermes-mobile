@@ -81,6 +81,10 @@ public struct SessionListFeature {
     /// The device-local selected profile name. Defaults to the persisted pref or `"default"`.
     /// New chats + the scoped session list are bound to this profile.
     public var selectedProfileName: String
+    /// Presentation only; selection and scoped requests keep the canonical name.
+    public var selectedProfileDisplayName: String {
+      profiles[id: selectedProfileName]?.displayName ?? selectedProfileName
+    }
     /// Whether the agent exposes `/api/profiles` (set false on a 404 from `profiles.list`).
     /// When false the selector is hidden and the list uses today's unscoped `/api/sessions`.
     public var profilesSupported: Bool
@@ -1361,6 +1365,7 @@ public struct SessionListFeature {
         let previousSelected = state.selectedProfileName
         var renamed = profile
         renamed.name = trimmed
+        if renamed.displayName == name { renamed.displayName = trimmed }
         state.profiles[id: name] = nil
         state.profiles.append(renamed)
         if state.selectedProfileName == name {

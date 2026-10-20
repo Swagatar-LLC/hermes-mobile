@@ -40,17 +40,19 @@ struct HermesProfileClientTests {
   @Test func listDecodesProfilesAndHitsEndpoint() async throws {
     MockURLProtocol.set(json: #"""
     {"profiles":[
-      {"name":"default","is_default":true,"model":"gpt-5.5","provider":"openai","skill_count":3,"has_env":true},
+      {"name":"default","display_name":"🪶 Wren","is_default":true,"model":"gpt-5.5","provider":"openai","skill_count":3,"has_env":true},
       {"name":"work","is_default":false,"skill_count":0,"has_env":false}
     ]}
     """#)
     let profiles = try await makeClient().list(connection)
     #expect(profiles.count == 2)
     #expect(profiles.first?.name == "default")
+    #expect(profiles.first?.displayName == "🪶 Wren")
     #expect(profiles.first?.isDefault == true)
     #expect(profiles.first?.model == "gpt-5.5")
     #expect(profiles.first?.skillCount == 3)
     #expect(profiles.last?.name == "work")
+    #expect(profiles.last?.displayName == "work")
     #expect(profiles.last?.isDefault == false)
     #expect(profiles.last?.model == nil)
 

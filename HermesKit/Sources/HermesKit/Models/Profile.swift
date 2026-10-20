@@ -9,6 +9,8 @@ import Foundation
 public struct Profile: Equatable, Sendable, Identifiable, Decodable {
   /// Profile name — the identifier used in `?profile=` scoping. Also the `id`.
   public var name: String
+  /// Server-provided presentation label; never used as a routing identifier.
+  public var displayName: String
   /// Whether this is the default/primary profile (can't be renamed/deleted).
   public var isDefault: Bool
   public var model: String?
@@ -22,6 +24,7 @@ public struct Profile: Equatable, Sendable, Identifiable, Decodable {
 
   enum CodingKeys: String, CodingKey {
     case name
+    case displayName = "display_name"
     case isDefault = "is_default"
     case model
     case provider
@@ -31,6 +34,7 @@ public struct Profile: Equatable, Sendable, Identifiable, Decodable {
 
   public init(
     name: String,
+    displayName: String? = nil,
     isDefault: Bool = false,
     model: String? = nil,
     provider: String? = nil,
@@ -38,6 +42,7 @@ public struct Profile: Equatable, Sendable, Identifiable, Decodable {
     hasEnv: Bool = false
   ) {
     self.name = name
+    self.displayName = displayName.flatMap { $0.isEmpty ? nil : $0 } ?? name
     self.isDefault = isDefault
     self.model = model
     self.provider = provider
@@ -48,6 +53,9 @@ public struct Profile: Equatable, Sendable, Identifiable, Decodable {
   public init(from decoder: Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
     name = (try? c.decode(String.self, forKey: .name)) ?? ""
+    displayName = (try? c.decode(String.self, forKey: .displayName)).flatMap {
+      $0.isEmpty ? nil : $0
+    } ?? name
     isDefault = (try? c.decodeIfPresent(Bool.self, forKey: .isDefault)) ?? false
     model = try? c.decodeIfPresent(String.self, forKey: .model)
     provider = try? c.decodeIfPresent(String.self, forKey: .provider)

@@ -1,3 +1,4 @@
+import ComposableArchitecture
 import Foundation
 import Testing
 
@@ -6,6 +7,37 @@ import Testing
 struct ProfileTests {
   private func decode(_ json: String) throws -> Profile {
     try JSONDecoder().decode(Profile.self, from: Data(json.utf8))
+  }
+
+  @Test func decodesDisplayNameWithoutChangingWireIdentity() throws {
+    let profile = try decode(#"{"name":"default","display_name":"🪶 Wren","is_default":true}"#)
+    #expect(profile.displayName == "🪶 Wren")
+    #expect(profile.name == "default")
+    #expect(profile.id == "default")
+  }
+
+  @Test func missingOrBlankDisplayNameFallsBackToName() throws {
+    #expect(try decode(#"{"name":"default"}"#).displayName == "default")
+    #expect(try decode(#"{"name":"default","display_name":""}"#).displayName == "default")
+  }
+
+  @Test func selectedPillUsesDisplayNameButRoutesByCanonicalName() {
+    let state = SessionListFeature.State(
+      connection: ServerConnection(baseURL: URL(string: "http://localhost:9119")!, token: "tok"),
+      profiles: [Profile(name: "default", displayName: "🪶 Wren", isDefault: true)],
+      selectedProfileName: "default",
+      profilesSupported: true
+    )
+    #expect(state.selectedProfileDisplayName == "🪶 Wren")
+    #expect(state.scopedProfileName == "default")
+  }
+
+  @Test func selectedPillFallsBackBeforeProfilesLoad() {
+    let state = SessionListFeature.State(
+      connection: ServerConnection(baseURL: URL(string: "http://localhost:9119")!, token: "tok"),
+      selectedProfileName: "default", profilesSupported: true
+    )
+    #expect(state.selectedProfileDisplayName == "default")
   }
 
   @Test func decodesFullDefaultPayload() throws {

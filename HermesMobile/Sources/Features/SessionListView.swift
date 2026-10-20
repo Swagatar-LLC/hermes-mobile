@@ -336,7 +336,7 @@ struct SessionListView: View {
           Image(systemName: "house.fill")
             .imageScale(.small)
         }
-        Text(store.selectedProfileName)
+        Text(store.selectedProfileDisplayName)
           .fontWeight(.semibold)
           .lineLimit(1)
         Image(systemName: "chevron.down")
@@ -348,7 +348,7 @@ struct SessionListView: View {
       // Safari-style glass chip in the navigation bar.
       .modifier(GlassBackground(shape: Capsule(), isInteractive: true))
     }
-    .accessibilityLabel("Profile: \(store.selectedProfileName)")
+    .accessibilityLabel("Profile: \(store.selectedProfileDisplayName)")
   }
 
   /// The profile `Menu`'s contents: each profile (checkmark on the active one; custom
@@ -360,7 +360,7 @@ struct SessionListView: View {
         Button {
           store.send(.selectProfile(name: profile.name))
         } label: {
-          Label(profile.name, systemImage: "house")
+          Label(profile.displayName, systemImage: "house")
         }
       } else {
         // Custom profiles: select on tap, with a nested menu for rename/delete.
@@ -382,7 +382,7 @@ struct SessionListView: View {
             Label("Delete", systemImage: "trash")
           }
         } label: {
-          Label(profile.name, systemImage: "person.crop.circle")
+          Label(profile.displayName, systemImage: "person.crop.circle")
         }
       }
     }
